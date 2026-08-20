@@ -9,7 +9,18 @@ No Arduino IDE, no PlatformIO, no recompiling per clip — the board runs a smal
 **player firmware** (installed once) that reads clips from a dedicated `media`
 flash partition. Each upload just rewrites that partition, which takes seconds.
 
-## Quick start
+## Use it online (GitHub Pages)
+
+Hosted at **https://aaronmylespereira.github.io/DisplayUploader/** — open it in
+**Chrome or Edge**, plug in the board, and flash. GitHub Pages serves over HTTPS,
+which is a secure context, so Web Serial works with no local server needed.
+
+To enable Pages on your fork: repo **Settings → Pages → Build and deployment →
+Source: Deploy from a branch → Branch: `main` / folder `/ (root)` → Save**. The
+site goes live at `https://<user>.github.io/<repo>/` after a minute. (The repo must
+be public, or you need GitHub Pro for private Pages.)
+
+## Quick start (local)
 
 1. Plug the T-Display-S3 into USB.
 2. Double-click **`serve.command`** (or run `python3 -m http.server 8123` in this
