@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>T-Display-S3 Media Uploader</title>
+<style>
+  :root{
+    --bg:#0f1216; --panel:#171b22; --panel2:#1e242d; --line:#2a323d;
+    --fg:#e6ebf2; --muted:#8b96a5; --accent:#4c8dff; --accent2:#2ecc71;
+    --warn:#e0b341; --err:#e5533c; --radius:10px;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{background:var(--bg);color:var(--fg);font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+  h1{font-size:17px;margin:0}
+  h2{font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:0 0 10px}
+  a{color:var(--accent)}
+  .app{display:grid;grid-template-columns:320px 1fr 340px;grid-template-rows:auto 1fr;height:100vh}
+  header{grid-column:1/-1;display:flex;align-items:center;gap:14px;padding:10px 16px;border-bottom:1px solid var(--line);background:var(--panel)}
+  header .chip{font-size:12px;color:var(--muted)}
+  .col{overflow-y:auto;padding:16px}
+  .col.left{border-right:1px solid var(--line);background:var(--panel)}
+  .col.right{border-left:1px solid var(--line);background:var(--panel)}
+  .card{background:var(--panel2);border:1px solid var(--line);border-radius:var(--radius);padding:14px;margin-bottom:14px}
+  .stage{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;padding:20px;background:
+    repeating-conic-gradient(#0c0f13 0% 25%, #10141a 0% 50%) 50%/22px 22px}
+  .drop{border:2px dashed var(--line);border-radius:14px;padding:34px;text-align:center;color:var(--muted);width:100%;max-width:560px;transition:.15s;cursor:pointer}
+  .drop.hot{border-color:var(--accent);color:var(--fg);background:rgba(76,141,255,.08)}
+  .preview-wrap{display:flex;flex-direction:column;align-items:center;gap:8px}
+  #previewCanvas{image-rendering:pixelated;border:1px solid var(--line);border-radius:6px;background:#000;touch-action:none;cursor:grab}
+  #previewCanvas.drag{cursor:grabbing}
+  .dims{font-size:12px;color:var(--muted)}
+  label.row{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:9px 0}
+  label.row span.k{color:var(--muted)}
+  input[type=range]{width:150px}
+  input[type=number]{width:64px;background:#0e1217;color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:3px 6px}
+  select,button{font:inherit}
+  select{background:#0e1217;color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:5px 8px}
+  .seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+  .seg button{background:transparent;color:var(--muted);border:0;padding:6px 12px;cursor:pointer}
+  .seg button.on{background:var(--accent);color:#fff}
+  button.btn{background:var(--accent);color:#fff;border:0;border-radius:8px;padding:9px 14px;cursor:pointer;font-weight:600}
+  button.btn.sec{background:#2a3340;color:var(--fg)}
+  button.btn:disabled{opacity:.45;cursor:not-allowed}
+  button.mini{background:#2a3340;color:var(--fg);border:0;border-radius:6px;padding:5px 9px;cursor:pointer}
+  .val{font-variant-numeric:tabular-nums;color:var(--fg);min-width:42px;text-align:right}
+  .meter{height:8px;background:#0e1217;border-radius:5px;overflow:hidden;margin-top:6px}
+  .meter > div{height:100%;background:var(--accent2);width:0;transition:width .15s ease}
+  .meter.over > div{background:var(--err)}
+  .prog{background:var(--accent)!important}
+  .prog.err{background:var(--err)!important}
+  .muted{color:var(--muted)}
+  .small{font-size:12px}
+  .flashlog{background:#0b0e12;border:1px solid var(--line);border-radius:8px;padding:8px;height:120px;overflow:auto;font:11px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;color:#c7d0db;white-space:pre-wrap}
+  .status-dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#555;margin-right:6px}
+  .status-dot.ok{background:var(--accent2)} .status-dot.busy{background:var(--warn)} .status-dot.err{background:var(--err)}
+  .hint{font-size:12px;color:var(--muted);margin-top:6px}
+  .divider{height:1px;background:var(--line);margin:12px 0}
+  .rowbtns{display:flex;gap:8px;flex-wrap:wrap}
+  .badge{display:inline-block;font-size:11px;background:#2a3340;color:var(--muted);border-radius:5px;padding:1px 6px;margin-left:6px}
+  .warnbox{background:rgba(224,179,65,.12);border:1px solid rgba(224,179,65,.4);color:#e9cf8f;border-radius:8px;padding:8px 10px;font-size:12px;margin-top:8px}
+  .playlist{margin-top:10px;display:flex;flex-direction:column;gap:7px}
+  .plitem{display:flex;align-items:center;gap:9px;padding:7px;border:1px solid var(--line);border-radius:9px;background:#0e1217;cursor:pointer}
+  .plitem.active{border-color:var(--accent);background:rgba(76,141,255,.10)}
+  .plitem .thumb{width:48px;height:48px;border-radius:5px;flex:0 0 auto;background:#000}
+  .plitem .plmeta{flex:1;min-width:0}
+  .plitem .plname{width:100%;background:transparent;border:0;color:var(--fg);font-weight:600;font-size:13px;padding:1px 0;border-bottom:1px solid transparent}
+  .plitem .plname:focus{outline:none;border-bottom:1px solid var(--accent)}
+  .plitem .plbtns{display:flex;flex-direction:column;gap:4px}
+  .board-strip{margin-top:16px;width:100%;max-width:620px;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px 12px}
+  .board-head{display:flex;justify-content:space-between;align-items:center;font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px}
+  .board-list{display:flex;gap:10px;overflow-x:auto;padding-bottom:4px}
+  .bclip{flex:0 0 auto;width:96px;text-align:center;position:relative}
+  .bclip canvas{width:96px;height:56px;border:1px solid var(--line);border-radius:6px;background:#000;object-fit:contain}
+  .bclip .bname{font-size:11px;color:var(--fg);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .bclip .bsize{font-size:10px;color:var(--muted)}
+  .bclip .bdel{position:absolute;top:2px;right:2px;background:rgba(20,24,30,.85);border:1px solid var(--line);color:#e5533c;border-radius:5px;font-size:11px;line-height:1;padding:2px 5px;cursor:pointer}
+  .bclip.cur canvas{border-color:var(--accent2);box-shadow:0 0 0 1px var(--accent2)}
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <h1>T-Display-S3 Media Uploader</h1>
+    <span class="chip">170×320 · ESP32-S3 · Web Serial</span>
+    <span style="flex:1"></span>
+    <span class="chip"><span id="serialDot" class="status-dot"></span><span id="serialState">Not connected</span></span>
+  </header>
+
+  <!-- LEFT: source + display -->
+  <div class="col left">
+    <div class="card">
+      <h2>1 · Playlist</h2>
+      <div id="drop" class="drop">
+        <div style="font-size:24px">⬆</div>
+        <div><b>Add</b> images, GIFs, or videos<br>drop or click (multiple OK)</div>
+        <div class="small" style="margin-top:6px">Up to 16 clips · plays clip 1, switch over WiFi</div>
+      </div>
+      <input id="file" type="file" accept="image/*,video/*" multiple hidden>
+      <div id="playlist" class="playlist"></div>
+    </div>
+
+    <div class="card">
+      <h2>2 · Display orientation</h2>
+      <label class="row"><span class="k">Orientation</span>
+        <select id="orient">
+          <option value="1">Landscape (320×170)</option>
+          <option value="3">Landscape flipped</option>
+          <option value="0">Portrait (170×320)</option>
+          <option value="2">Portrait flipped</option>
+        </select>
+      </label>
+      <div class="hint">Matches the player's <code>setRotation()</code>. Frames are centered on screen.</div>
+    </div>
+
+    <div class="card">
+      <h2>Fit &amp; frame</h2>
+      <label class="row"><span class="k">Fit</span>
+        <span class="seg" id="fitSeg">
+          <button data-fit="contain" class="on">Contain</button>
+          <button data-fit="cover">Cover</button>
+          <button data-fit="stretch">Stretch</button>
+        </span>
+      </label>
+      <label class="row"><span class="k">Zoom</span>
+        <input id="zoom" type="range" min="0.2" max="4" step="0.01" value="1">
+        <span class="val" id="zoomV">1.00×</span></label>
+      <label class="row"><span class="k">Rotate</span>
+        <input id="rot" type="range" min="-180" max="180" step="1" value="0">
+        <span class="val" id="rotV">0°</span></label>
+      <div class="rowbtns">
+        <button class="mini" id="rot90">Rotate 90°</button>
+        <button class="mini" id="resetGeo">Reset position</button>
+      </div>
+      <div class="hint">Drag the preview to pan/crop.</div>
+    </div>
+  </div>
+
+  <!-- CENTER: preview -->
+  <div class="col stage">
+    <div class="preview-wrap">
+      <canvas id="previewCanvas" width="320" height="170"></canvas>
+      <div class="dims"><span id="dimLabel">320 × 170</span> · <span id="frameLabel">0 frames</span> · <span id="playLabel">paused</span></div>
+      <div class="rowbtns">
+        <button class="mini" id="playPause">⏸ Pause</button>
+        <button class="mini" id="zoomView">View 2×</button>
+      </div>
+    </div>
+    <div class="small muted" id="renderState"></div>
+
+    <div id="boardStrip" class="board-strip" style="display:none">
+      <div class="board-head">
+        <span>On the board <span id="boardCount" class="badge"></span></span>
+        <button class="mini" id="boardRefresh">↻ Refresh</button>
+      </div>
+      <div id="boardUsage" class="small muted" style="margin-bottom:6px"></div>
+      <div class="meter" style="height:7px;margin-bottom:10px"><div id="boardUsageBar" class="prog"></div></div>
+      <div id="boardList" class="board-list"></div>
+    </div>
+  </div>
+
+  <!-- RIGHT: color, playback, flash -->
+  <div class="col right">
+    <div class="card">
+      <h2>3 · Color</h2>
+      <label class="row"><span class="k">Mode</span>
+        <span class="seg" id="colorSeg">
+          <button data-mode="color" class="on">Color</button>
+          <button data-mode="mono">Mono (1-bit)</button>
+        </span>
+      </label>
+      <div id="colorControls">
+        <label class="row"><span class="k">Brightness</span>
+          <input id="bright" type="range" min="-100" max="100" step="1" value="0"><span class="val" id="brightV">0</span></label>
+        <label class="row"><span class="k">Contrast</span>
+          <input id="contrast" type="range" min="-100" max="100" step="1" value="0"><span class="val" id="contrastV">0</span></label>
+        <label class="row"><span class="k">Compress</span>
+          <span class="seg" id="compressSeg">
+            <button data-compress="auto" class="on">Auto</button>
+            <button data-compress="off">Off</button>
+          </span></label>
+        <div class="hint" style="margin-top:-2px">Auto = palette + RLE when it shrinks the clip (great for GIFs); may reduce to 256 colors. Off = full RGB565.</div>
+      </div>
+      <div id="monoControls" style="display:none">
+        <label class="row"><span class="k">Threshold</span>
+          <input id="thresh" type="range" min="0" max="255" step="1" value="128"><span class="val" id="threshV">128</span></label>
+        <label class="row"><span class="k">Dither</span><input id="dither" type="checkbox"></label>
+      </div>
+      <label class="row"><span class="k">Invert</span><input id="invert" type="checkbox"></label>
+    </div>
+
+    <div class="card">
+      <h2>Playback</h2>
+      <label class="row"><span class="k">Frame rate</span>
+        <input id="fps" type="range" min="1" max="25" step="1" value="25"><span class="val" id="fpsV">25 fps</span></label>
+      <div class="hint" style="margin-top:-4px">Display tops out near 25 fps for full frames; preview matches on-screen speed.</div>
+      <label class="row"><span class="k">Max frames</span>
+        <input id="maxFrames" type="range" min="1" max="240" step="1" value="60"><span class="val" id="maxFramesV">60</span></label>
+      <div id="videoRange" style="display:none">
+        <label class="row"><span class="k">Start (s)</span><input id="vStart" type="number" min="0" step="0.1" value="0"></label>
+        <label class="row"><span class="k">End (s)</span><input id="vEnd" type="number" min="0" step="0.1" value="0"></label>
+      </div>
+      <div class="divider"></div>
+      <div class="small">Flash budget <span id="budgetPct" class="badge">0%</span></div>
+      <div class="meter" id="meter"><div id="meterBar"></div></div>
+      <div class="small muted" id="budgetText" style="margin-top:5px">—</div>
+      <div id="budgetWarn" class="warnbox" style="display:none"></div>
+    </div>
+
+    <div class="card">
+      <h2>4 · Flash to board</h2>
+      <label class="row"><span class="k">WiFi name (SSID)</span>
+        <input id="ssid" type="text" value="T-Display-S3" maxlength="32" style="width:130px;background:#0e1217;color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:4px 7px"></label>
+      <div class="hint" style="margin:0 0 10px">Open network. Join it, then browse to <b>192.168.4.1</b> to switch clips.</div>
+      <div class="rowbtns" style="margin-bottom:10px">
+        <button class="btn sec" id="connectBtn">Connect</button>
+        <button class="btn" id="uploadBtn" disabled>Upload playlist ▸</button>
+      </div>
+      <label class="row"><span class="k">Also (re)install player firmware</span><input id="doFw" type="checkbox"></label>
+      <div class="hint">First-time boards need the firmware once. After that, just Upload media.</div>
+      <div id="progWrap" style="display:none;margin:10px 0 4px">
+        <div class="meter" style="height:11px"><div id="progBar" class="prog"></div></div>
+        <div class="small muted" id="progText" style="margin-top:5px">—</div>
+      </div>
+      <div class="divider"></div>
+      <div class="rowbtns" style="margin-bottom:8px">
+        <button class="mini" id="downloadBin">Download media .bin</button>
+      </div>
+      <div class="flashlog" id="log"></div>
+    </div>
+  </div>
+</div>
+
+<script src="esptool-bundle.js?v=1"></script>
+<script src="player-firmware.js?v=6"></script>
+<script src="app.js?v=7"></script>
+</body>
+</html>
