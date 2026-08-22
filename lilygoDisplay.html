@@ -98,6 +98,10 @@
         <div class="small" style="margin-top:6px">Up to 16 clips · new drops are added to what's already on the board · plays clip 1, switch over WiFi</div>
       </div>
       <input id="file" type="file" accept="image/*,video/*" multiple hidden>
+      <div id="decodeStatus" style="display:none;margin:10px 0 2px">
+        <div class="meter" style="height:9px"><div id="decodeBar" class="prog"></div></div>
+        <div class="small muted" id="decodeText" style="margin-top:5px">—</div>
+      </div>
       <div id="playlist" class="playlist"></div>
     </div>
 
@@ -170,11 +174,13 @@
           <button data-mode="mono">Mono (1-bit)</button>
         </span>
       </label>
+      <label class="row"><span class="k">Brightness</span>
+        <input id="bright" type="range" min="-100" max="100" step="1" value="0"><span class="val" id="brightV">0</span></label>
+      <label class="row"><span class="k">Contrast</span>
+        <input id="contrast" type="range" min="-100" max="100" step="1" value="0"><span class="val" id="contrastV">0</span></label>
+      <label class="row"><span class="k">Pixel size</span>
+        <input id="block" type="range" min="1" max="32" step="1" value="1"><span class="val" id="blockV">1 px</span></label>
       <div id="colorControls">
-        <label class="row"><span class="k">Brightness</span>
-          <input id="bright" type="range" min="-100" max="100" step="1" value="0"><span class="val" id="brightV">0</span></label>
-        <label class="row"><span class="k">Contrast</span>
-          <input id="contrast" type="range" min="-100" max="100" step="1" value="0"><span class="val" id="contrastV">0</span></label>
         <label class="row"><span class="k">Compress</span>
           <span class="seg" id="compressSeg">
             <button data-compress="auto" class="on">Auto</button>
@@ -250,6 +256,6 @@
 
 <script src="esptool-bundle.js?v=1"></script>
 <script src="player-firmware.js?v=7"></script>
-<script src="app.js?v=11"></script>
+<script src="app.js?v=12"></script>
 </body>
 </html>

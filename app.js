@@ -25,13 +25,13 @@ const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 function defaultEdit() {
   return {
     rotation: 1, fit: 'contain', zoom: 1, rotate: 0, panX: 0, panY: 0,
-    mode: 'color', bright: 0, contrast: 0, thresh: 128, dither: 'none', invert: false,
+    mode: 'color', bright: 0, contrast: 0, blockSize: 1, thresh: 128, dither: 'none', invert: false,
     compress: 'auto',   // 'auto' = palette+RLE when it saves, else raw RGB565; 'off' = raw
     fps: 25, maxFrames: 60, vStart: 0, vEnd: 0,
   };
 }
 // Per-control defaults for double-click-to-reset on sliders.
-const SLIDER_DEFAULTS = { zoom: 1, rot: 0, bright: 0, contrast: 0, thresh: 128, fps: 25, maxFrames: 60 };
+const SLIDER_DEFAULTS = { zoom: 1, rot: 0, bright: 0, contrast: 0, block: 1, thresh: 128, fps: 25, maxFrames: 60 };
 
 const clips = [];   // { name, file, srcType, srcFrames:[{canvas,w,h}], edit }
 let active = -1;
@@ -42,19 +42,31 @@ const E = () => clips[active] && clips[active].edit;
 // ==========================================================================
 // Source decoding
 // ==========================================================================
+// Progress UI for the (potentially slow) decode of a dropped file — videos are
+// seeked frame-by-frame and big GIFs decode frame-by-frame too, which used to
+// leave the panel blank with no feedback until the clip suddenly appeared.
+function showDecode(on) { const e = $('decodeStatus'); if (e) e.style.display = on ? '' : 'none'; }
+function setDecode(pct, text) { const b = $('decodeBar'); if (b) b.style.width = clamp(pct, 0, 100) + '%'; const t = $('decodeText'); if (t && text != null) t.textContent = text; }
+
 async function addFiles(fileList) {
   const files = [...fileList];
   const boardCount = board ? board.count : 0;   // clips already on the board, so we don't stage more than can ever fit
-  for (const file of files) {
-    if (clips.length + boardCount >= MAX_CLIPS) { log(`Max ${MAX_CLIPS} clips reached (${boardCount} already on the board); skipping ${file.name}.`); break; }
-    const clip = { name: baseName(file.name), file, srcType: null, srcFrames: [], edit: defaultEdit() };
-    try {
-      await decodeInto(clip);
-    } catch (e) { log('Decode error (' + file.name + '): ' + e.message); continue; }
-    autoOrient(clip);
-    clips.push(clip);
-    log(`Added "${clip.name}" (${clip.srcType}, ${clip.srcFrames.length} frame${clip.srcFrames.length>1?'s':''}, ${clip.edit.rotation===0?'portrait':'landscape'} auto).`);
-  }
+  showDecode(true);
+  try {
+    for (let fi = 0; fi < files.length; fi++) {
+      const file = files[fi];
+      if (clips.length + boardCount >= MAX_CLIPS) { log(`Max ${MAX_CLIPS} clips reached (${boardCount} already on the board); skipping ${file.name}.`); break; }
+      const clip = { name: baseName(file.name), file, srcType: null, srcFrames: [], edit: defaultEdit() };
+      const label = files.length > 1 ? `(${fi+1}/${files.length}) "${clip.name}"` : `"${clip.name}"`;
+      setDecode(0, `Processing ${label}…`);
+      try {
+        await decodeInto(clip, (i, n) => setDecode(n ? (i/n)*100 : 0, `Processing ${label} — frame ${i}/${n}`));
+      } catch (e) { log('Decode error (' + file.name + '): ' + e.message); continue; }
+      autoOrient(clip);
+      clips.push(clip);
+      log(`Added "${clip.name}" (${clip.srcType}, ${clip.srcFrames.length} frame${clip.srcFrames.length>1?'s':''}, ${clip.edit.rotation===0?'portrait':'landscape'} auto).`);
+    }
+  } finally { showDecode(false); }
   renderPlaylist();
   if (active < 0 && clips.length) selectClip(0);
   else { updateBudget(); }
@@ -71,12 +83,12 @@ function autoOrient(clip) {
   clip.edit.rotation = f0.h > f0.w ? 0 : 1;   // 0 = portrait, 1 = landscape (ties -> landscape)
 }
 
-async function decodeInto(clip) {
+async function decodeInto(clip, onProgress) {
   clip.srcFrames = [];
   const file = clip.file;
-  if (file.type.startsWith('video')) { clip.srcType = 'video'; await decodeVideo(clip); }
-  else if (file.type === 'image/gif') { clip.srcType = 'gif'; await decodeGif(clip); }
-  else { clip.srcType = 'image'; await decodeImage(clip); }
+  if (file.type.startsWith('video')) { clip.srcType = 'video'; await decodeVideo(clip, onProgress); }
+  else if (file.type === 'image/gif') { clip.srcType = 'gif'; await decodeGif(clip, onProgress); }
+  else { clip.srcType = 'image'; await decodeImage(clip); if (onProgress) onProgress(1, 1); }
 }
 
 function frameToCanvas(src, w, h) {
@@ -90,7 +102,7 @@ async function decodeImage(clip) {
   bmp.close && bmp.close();
 }
 
-async function decodeGif(clip) {
+async function decodeGif(clip, onProgress) {
   if (typeof ImageDecoder === 'undefined') throw new Error('ImageDecoder unavailable; use Chrome/Edge.');
   const dec = new ImageDecoder({ data: await clip.file.arrayBuffer(), type: 'image/gif' });
   await dec.tracks.ready;
@@ -100,11 +112,12 @@ async function decodeGif(clip) {
     const { image } = await dec.decode({ frameIndex: i });
     frames.push(frameToCanvas(image, image.displayWidth, image.displayHeight));
     image.close();
+    if (onProgress) onProgress(i + 1, count);
   }
   clip.srcFrames = frames; dec.close();
 }
 
-async function decodeVideo(clip) {
+async function decodeVideo(clip, onProgress) {
   const url = URL.createObjectURL(clip.file);
   const v = document.createElement('video');
   v.muted = true; v.playsInline = true; v.src = url;
@@ -120,6 +133,7 @@ async function decodeVideo(clip) {
     const t = n > 1 ? start + (span * i) / (n - 1) : start;
     await seekVideo(v, Math.min(t, end));
     frames.push(frameToCanvas(v, v.videoWidth, v.videoHeight));
+    if (onProgress) onProgress(i + 1, n);
   }
   clip.srcFrames = frames;
   clip._dur = dur;
@@ -170,9 +184,28 @@ function applyFilters(img, edit, W, H) {
     if (colorInvert) { r = 255-r; g = 255-g; bl = 255-bl; }
     d[i] = clamp(r,0,255); d[i+1] = clamp(g,0,255); d[i+2] = clamp(bl,0,255);
   }
+  if (edit.blockSize > 1) pixelate(img, edit.blockSize, W, H);
   if (edit.mode === 'mono') monochrome(img, edit, W, H);
   else if (edit.dither && edit.dither !== 'none') colorDither(img, edit, W, H);
   return img;
+}
+
+// Chunky-pixel look (the lofi-gifmaker "Pixel Size" control): average each
+// blockSize×blockSize cell and paint the whole cell that average. blockSize 1
+// is a no-op. Runs before dithering, so the dither textures the pixel blocks.
+function pixelate(img, blockSize, W, H) {
+  const d = img.data, b = Math.max(1, Math.round(blockSize));
+  if (b <= 1) return;
+  for (let y0 = 0; y0 < H; y0 += b) {
+    const y1 = Math.min(H, y0 + b);
+    for (let x0 = 0; x0 < W; x0 += b) {
+      const x1 = Math.min(W, x0 + b);
+      let sr = 0, sg = 0, sb = 0, c = 0;
+      for (let y = y0; y < y1; y++) { let o = (y*W + x0)*4; for (let x = x0; x < x1; x++, o += 4) { sr += d[o]; sg += d[o+1]; sb += d[o+2]; c++; } }
+      const r = (sr/c)|0, g = (sg/c)|0, bl = (sb/c)|0;
+      for (let y = y0; y < y1; y++) { let o = (y*W + x0)*4; for (let x = x0; x < x1; x++, o += 4) { d[o]=r; d[o+1]=g; d[o+2]=bl; } }
+    }
+  }
 }
 
 // 4×4 Bayer matrix (0..15) for the ordered-dither styles. These dithering modes
@@ -568,6 +601,7 @@ function loadControls(edit) {
   setRange('rot', edit.rotate, v => v+'°');
   setRange('bright', edit.bright, v => ''+v);
   setRange('contrast', edit.contrast, v => ''+v);
+  setRange('block', edit.blockSize, v => v+' px');
   setRange('thresh', edit.thresh, v => ''+v);
   setRange('fps', edit.fps, v => v+' fps');
   setRange('maxFrames', edit.maxFrames, v => ''+v);
@@ -889,54 +923,73 @@ function renderBoard() {
   });
 }
 
-// Delete a clip AND reclaim its space. The old behavior only rewrote the
+// Delete a clip AND reclaim its space. The naive version only rewrote the
 // directory sector, leaving the clip's bytes stranded in flash (a hole that
-// only "Replace entire board" ever cleaned up). Here we read back every
-// surviving clip, repack them contiguously from CLIP_DATA_START — mirroring the
-// from-scratch layout in packPlaylist() — and rewrite the whole media image, so
-// the freed bytes actually return to the budget and every memory readout
-// (board strip + upload budget) reflects the smaller playlist immediately.
+// only "Replace entire board" ever cleaned up).
+//
+// To keep this fast we exploit the layout: clips are stored back-to-back in
+// playlist order, so deleting clip #k means only the clips AFTER it slide down
+// to fill the gap — everything before it keeps its exact offset and bytes, and
+// never needs to be read or rewritten. Deleting the last clip therefore moves
+// no data at all (just a 4 KB directory rewrite); deleting the first is the only
+// case that relocates the whole tail. That tail is read to the host once and
+// written back at its new, lower offset, so the freed bytes actually return to
+// the budget and every memory readout updates immediately.
 async function deleteFromBoard(index) {
   if (!board || !board.raw || serial.busy) return;
   const removed = board.clips[index];
-  if (!confirm(`Delete "${removed.name}" from the board?\nIts ${(removed.size/1e6).toFixed(2)} MB is reclaimed now and the remaining clips are repacked.`)) return;
-  serial.busy = true; setSerial('busy', 'Deleting…'); showProgress(true); setProgress(0, 'Reading remaining clips…');
+  if (!confirm(`Delete "${removed.name}" from the board?\nIts ${(removed.size/1e6).toFixed(2)} MB is reclaimed and any later clips are shifted down.`)) return;
+  serial.busy = true; setSerial('busy', 'Deleting…'); showProgress(true); setProgress(0, 'Deleting…');
   try {
     const survivors = board.clips.filter((_, i) => i !== index);
+    const tail = survivors.slice(index);   // clips originally after the deleted one — the only data that moves
+    // Where the shifted tail may safely begin: just past the last kept clip
+    // before the gap, rounded UP to a flash sector so the write never erases a
+    // sector still holding bytes of that preceding clip. (CLIP_DATA_START also
+    // is the sector size.) With nothing before it, that's CLIP_DATA_START.
+    const prefixEnd = index > 0 ? survivors[index-1].offset + survivors[index-1].size : CLIP_DATA_START;
+    const writeStart = Math.ceil(prefixEnd / CLIP_DATA_START) * CLIP_DATA_START;
+
     await withLoader(async (loader) => {
-      // Pull each surviving clip's bytes off the board so we can repack them.
+      // Read only the tail clips' bytes (nothing when deleting the last clip).
       const blobs = [];
-      for (let i = 0; i < survivors.length; i++) {
-        setProgress(Math.round((i / Math.max(survivors.length, 1)) * 50), `Reading clip ${i+1}/${survivors.length}…`);
-        blobs.push(await loader.readFlash(MEDIA_OFFSET + survivors[i].offset, survivors[i].size));
+      for (let i = 0; i < tail.length; i++) {
+        setProgress(Math.round((i / Math.max(tail.length, 1)) * 45), `Reading clip ${index+i+2}/${board.clips.length}…`);
+        blobs.push(await loader.readFlash(MEDIA_OFFSET + tail[i].offset, tail[i].size));
       }
-      // Rebuild the 4096-byte directory sector + a contiguous data payload with
-      // fresh offsets, identical in shape to a "Replace entire board" write.
-      const total = CLIP_DATA_START + blobs.reduce((a, b) => a + b.length, 0);
-      const out = new Uint8Array(total);
-      const dv = new DataView(out.buffer);
+      // New directory: prefix clips keep their offsets; tail clips get packed
+      // contiguously from writeStart.
+      const header = new Uint8Array(CLIP_DATA_START);
+      const dv = new DataView(header.buffer);
       const ssid = (board.ssid || 'T-Display-S3').slice(0, 32);
-      out.set([0x54,0x44,0x50,0x4C], 0);                 // "TDPL"
+      header.set([0x54,0x44,0x50,0x4C], 0);              // "TDPL"
       dv.setUint8(4, 1); dv.setUint8(5, survivors.length); dv.setUint8(6, 0); dv.setUint8(7, 0);
       dv.setUint8(8, 1); dv.setUint8(9, ssid.length); dv.setUint8(10, 0);
-      for (let i = 0; i < ssid.length; i++) out[12 + i] = ssid.charCodeAt(i);
-      let off = CLIP_DATA_START;
+      for (let i = 0; i < ssid.length; i++) header[12 + i] = ssid.charCodeAt(i);
+      let tailOff = writeStart;
       survivors.forEach((clip, i) => {
         const e = DIR_OFFSET + i * DIR_ENTRY;
-        dv.setUint32(e, off, true); dv.setUint32(e + 4, blobs[i].length, true);
+        const clipOff = (i < index) ? clip.offset : tailOff;
+        if (i >= index) tailOff += blobs[i - index].length;
+        dv.setUint32(e, clipOff, true); dv.setUint32(e + 4, clip.size, true);
         const nm = (clip.name || '').slice(0, 24);
-        for (let k = 0; k < nm.length; k++) out[e + 8 + k] = nm.charCodeAt(k);
-        out.set(blobs[i], off); off += blobs[i].length;
+        for (let k = 0; k < nm.length; k++) header[e + 8 + k] = nm.charCodeAt(k);
       });
-      setProgress(60, 'Writing compacted playlist…');
+
+      // Assemble the relocated tail payload as one contiguous block.
+      const payload = new Uint8Array(blobs.reduce((a, b) => a + b.length, 0));
+      let p = 0; for (const b of blobs) { payload.set(b, p); p += b.length; }
+
+      setProgress(55, 'Writing…');
+      const fileArray = [{ data: binStr(header), address: MEDIA_OFFSET }];
+      if (payload.length) fileArray.push({ data: binStr(payload), address: MEDIA_OFFSET + writeStart });
       await loader.writeFlash({
-        fileArray: [{ data: binStr(out), address: MEDIA_OFFSET }],
-        flashSize: 'keep', eraseAll: false, compress: true,
-        reportProgress: (_idx, written, t) => setProgress(60 + Math.round((written / t) * 40), 'Writing compacted playlist…'),
+        fileArray, flashSize: 'keep', eraseAll: false, compress: true,
+        reportProgress: (_idx, written, t) => setProgress(55 + Math.round((written / t) * 45), 'Writing…'),
       });
     });
     setProgress(100, 'Deleted');
-    log(`Deleted "${removed.name}" and repacked ${survivors.length} remaining clip${survivors.length!==1?'s':''} — ${(removed.size/1e6).toFixed(2)} MB reclaimed.`);
+    log(`Deleted "${removed.name}" — ${(removed.size/1e6).toFixed(2)} MB reclaimed${tail.length ? `, ${tail.length} later clip${tail.length!==1?'s':''} shifted down` : ''}.`);
   } catch (e) { setSerial('err', 'Delete failed'); progressError('Delete failed — see log'); log('Delete failed: ' + (e.message||e)); serial.busy = false; return; }
   serial.busy = false;
   await readBoard();      // refresh board strip + storage meter from flash
@@ -965,7 +1018,10 @@ function reprocessActiveVideo() {
   const clip = clips[active];
   if (!clip || clip.srcType !== 'video') { rebuild(); return; }
   $('renderState').textContent = 'Re-sampling video…';
-  decodeInto(clip).then(() => { $('renderState').textContent = ''; doRebuild(); });
+  showDecode(true); setDecode(0, `Re-sampling "${clip.name}"…`);
+  decodeInto(clip, (i, n) => setDecode(n ? (i/n)*100 : 0, `Re-sampling "${clip.name}" — frame ${i}/${n}`))
+    .then(() => { $('renderState').textContent = ''; doRebuild(); })
+    .finally(() => showDecode(false));
 }
 
 function initUI() {
@@ -992,6 +1048,7 @@ function initUI() {
   bindRange('rot', 'rotate', v => v+'°');
   bindRange('bright', 'bright', v => ''+v);
   bindRange('contrast', 'contrast', v => ''+v);
+  bindRange('block', 'blockSize', v => v+' px');
   bindRange('thresh', 'thresh', v => ''+v);
   bindRange('fps', 'fps', v => v+' fps', reprocessActiveVideo);
   bindRange('maxFrames', 'maxFrames', v => ''+v, reprocessActiveVideo);
