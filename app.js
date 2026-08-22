@@ -903,7 +903,12 @@ async function readBoard() {
 
 function renderBoard() {
   const host = $('boardList');
-  if (!board || !board.count) { host.innerHTML = '<div class="small muted">No playlist on the board.</div>'; $('boardCount').textContent=''; $('boardUsage').textContent=''; return; }
+  if (!board || !board.count) {
+    host.innerHTML = '<div class="small muted">No playlist on the board.</div>';
+    $('boardCount').textContent=''; $('boardUsage').textContent='';
+    const bar = $('boardUsageBar'); if (bar) { bar.style.width = '0%'; bar.classList.remove('err'); }   // reset the meter, else it keeps its last (non-empty) fill
+    return;
+  }
   $('boardCount').textContent = board.count + (board.ssid ? ' · '+board.ssid : '');
   const used = CLIP_DATA_START + board.clips.reduce((a, c) => a + c.size, 0);
   const pct = (used / MEDIA_MAX) * 100;
