@@ -95,7 +95,7 @@
       <div id="drop" class="drop">
         <div style="font-size:24px">⬆</div>
         <div><b>Add</b> images, GIFs, or videos<br>drop or click (multiple OK)</div>
-        <div class="small" style="margin-top:6px">Up to 16 clips · plays clip 1, switch over WiFi</div>
+        <div class="small" style="margin-top:6px">Up to 16 clips · new drops are added to what's already on the board · plays clip 1, switch over WiFi</div>
       </div>
       <input id="file" type="file" accept="image/*,video/*" multiple hidden>
       <div id="playlist" class="playlist"></div>
@@ -111,7 +111,7 @@
           <option value="2">Portrait flipped</option>
         </select>
       </label>
-      <div class="hint">Matches the player's <code>setRotation()</code>. Frames are centered on screen.</div>
+      <div class="hint">Auto-detected from each clip's own width/height when it's added — portrait art gets Portrait, landscape art gets Landscape. Pick a value here to override it for the selected clip. Matches the player's <code>setRotation()</code>; frames are centered on screen.</div>
     </div>
 
     <div class="card">
@@ -215,10 +215,15 @@
       <div class="hint" style="margin:0 0 10px">Open network. Join it, then browse to <b>192.168.4.1</b> to switch clips.</div>
       <div class="rowbtns" style="margin-bottom:10px">
         <button class="btn sec" id="connectBtn">Connect</button>
-        <button class="btn" id="uploadBtn" disabled>Upload playlist ▸</button>
+        <button class="btn" id="uploadBtn" disabled>Add to board ▸</button>
       </div>
+      <div class="hint" style="margin:0 0 10px">Adds the clips in the panel on the left to whatever's already flashed — existing clips are not erased.</div>
+      <div class="rowbtns" style="margin-bottom:10px">
+        <button class="btn sec" id="replaceBtn" disabled>Replace entire board ⚠</button>
+      </div>
+      <div class="hint" style="margin:0 0 10px">Erases everything currently on the board and flashes only the clips in the panel on the left.</div>
       <label class="row"><span class="k">Also (re)install player firmware</span><input id="doFw" type="checkbox"></label>
-      <div class="hint">First-time boards need the firmware once. After that, just Upload media.</div>
+      <div class="hint">First-time boards need the firmware once. After that, just Add media.</div>
       <div id="progWrap" style="display:none;margin:10px 0 4px">
         <div class="meter" style="height:11px"><div id="progBar" class="prog"></div></div>
         <div class="small muted" id="progText" style="margin-top:5px">—</div>
@@ -234,6 +239,6 @@
 
 <script src="esptool-bundle.js?v=1"></script>
 <script src="player-firmware.js?v=6"></script>
-<script src="app.js?v=7"></script>
+<script src="app.js?v=8"></script>
 </body>
 </html>

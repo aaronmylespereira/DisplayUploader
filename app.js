@@ -44,18 +44,31 @@ const E = () => clips[active] && clips[active].edit;
 // ==========================================================================
 async function addFiles(fileList) {
   const files = [...fileList];
+  const boardCount = board ? board.count : 0;   // clips already on the board, so we don't stage more than can ever fit
   for (const file of files) {
-    if (clips.length >= MAX_CLIPS) { log(`Max ${MAX_CLIPS} clips reached; skipping ${file.name}.`); break; }
+    if (clips.length + boardCount >= MAX_CLIPS) { log(`Max ${MAX_CLIPS} clips reached (${boardCount} already on the board); skipping ${file.name}.`); break; }
     const clip = { name: baseName(file.name), file, srcType: null, srcFrames: [], edit: defaultEdit() };
     try {
       await decodeInto(clip);
     } catch (e) { log('Decode error (' + file.name + '): ' + e.message); continue; }
+    autoOrient(clip);
     clips.push(clip);
-    log(`Added "${clip.name}" (${clip.srcType}, ${clip.srcFrames.length} frame${clip.srcFrames.length>1?'s':''}).`);
+    log(`Added "${clip.name}" (${clip.srcType}, ${clip.srcFrames.length} frame${clip.srcFrames.length>1?'s':''}, ${clip.edit.rotation===0?'portrait':'landscape'} auto).`);
   }
   renderPlaylist();
   if (active < 0 && clips.length) selectClip(0);
   else { updateBudget(); }
+}
+
+// Auto-pick portrait vs landscape from the source artwork's own aspect ratio.
+// This only sets the *default* orientation for a freshly added clip — the
+// orientation dropdown (per clip, in "2 · Display orientation") still lets
+// the user override it by hand afterward, and that manual choice is never
+// touched again by this function.
+function autoOrient(clip) {
+  const f0 = clip.srcFrames[0];
+  if (!f0) return;
+  clip.edit.rotation = f0.h > f0.w ? 0 : 1;   // 0 = portrait, 1 = landscape (ties -> landscape)
 }
 
 async function decodeInto(clip) {
@@ -252,7 +265,6 @@ function getClipBlob(clip) {
 }
 function invalidateClip(clip) { if (clip) { clip._key = null; clip._blob = null; } }
 function clipSize(clip) { return getClipBlob(clip).length; }
-function playlistSize() { return CLIP_DATA_START + clips.reduce((a, c) => a + clipSize(c), 0); }
 
 // Render every frame of a clip to RGB565 Uint16 arrays (for encoding).
 function renderFrames565(clip) {
@@ -410,16 +422,39 @@ function packPlaylist() {
   return out;
 }
 
+// Offset (from the start of the media partition) just past the last byte of
+// existing clip data, per a board directory — or CLIP_DATA_START if there is
+// none/it's empty. Doesn't round to a sector boundary; callers that need an
+// actual flash write address do that themselves (see buildUploadPlan).
+function dataEndOffset(eb) {
+  const list = (eb && eb.clips) || [];
+  return list.length ? list.reduce((mx, c) => Math.max(mx, c.offset + c.size), CLIP_DATA_START) : CLIP_DATA_START;
+}
+
+// Bytes the board will use after appending the local (staged) clips onto
+// whatever the last board read told us is already flashed. Falls back to
+// just the local clips (old behavior) if we haven't read a board yet.
+function totalPlannedUsed() {
+  const base = Math.ceil(dataEndOffset(board) / CLIP_DATA_START) * CLIP_DATA_START;
+  return base + clips.reduce((a, c) => a + clipSize(c), 0);
+}
+
 function updateBudget() {
-  const used = playlistSize(), pct = used / MEDIA_MAX;
+  const used = totalPlannedUsed(), pct = used / MEDIA_MAX;
+  const existingCount = board ? board.count : 0, totalCount = existingCount + clips.length;
   $('meterBar').style.width = clamp(pct*100, 0, 100) + '%';
-  $('meter').classList.toggle('over', used > MEDIA_MAX);
+  const overBytes = used > MEDIA_MAX, overCount = totalCount > MAX_CLIPS, over = overBytes || overCount;
+  $('meter').classList.toggle('over', over);
   $('budgetPct').textContent = (pct*100).toFixed(1) + '%';
-  $('budgetText').textContent = `${(used/1e6).toFixed(2)} MB of ${(MEDIA_MAX/1e6).toFixed(1)} MB · ${clips.length} clip${clips.length!==1?'s':''}`;
-  const over = used > MEDIA_MAX, warn = $('budgetWarn');
-  if (over) { warn.style.display = ''; warn.textContent = `Over by ${((used-MEDIA_MAX)/1e6).toFixed(2)} MB. Trim clips, lower FPS/frames, or use Mono.`; }
+  $('budgetText').textContent = existingCount
+    ? `${(used/1e6).toFixed(2)} MB of ${(MEDIA_MAX/1e6).toFixed(1)} MB · ${existingCount} on board + ${clips.length} new = ${totalCount} clip${totalCount!==1?'s':''}`
+    : `${(used/1e6).toFixed(2)} MB of ${(MEDIA_MAX/1e6).toFixed(1)} MB · ${clips.length} clip${clips.length!==1?'s':''}`;
+  const warn = $('budgetWarn');
+  if (overCount) { warn.style.display = ''; warn.textContent = `Too many clips: ${totalCount} of ${MAX_CLIPS} max. Remove some before uploading.`; }
+  else if (overBytes) { warn.style.display = ''; warn.textContent = `Over by ${((used-MEDIA_MAX)/1e6).toFixed(2)} MB. Trim clips, lower FPS/frames, or use Mono.`; }
   else warn.style.display = 'none';
   $('uploadBtn').disabled = over || !serial.connected || clips.length === 0;
+  const rb = $('replaceBtn'); if (rb) rb.disabled = !serial.connected || clips.length === 0;
 }
 
 // ==========================================================================
@@ -427,7 +462,7 @@ function updateBudget() {
 // ==========================================================================
 function renderPlaylist() {
   const host = $('playlist');
-  if (!clips.length) { host.innerHTML = '<div class="small muted">No clips yet. Add media above.</div>'; return; }
+  if (!clips.length) { host.innerHTML = '<div class="small muted">No new clips staged — drop media above to add to the board.</div>'; return; }
   host.innerHTML = '';
   clips.forEach((clip, i) => {
     const row = document.createElement('div');
@@ -528,24 +563,87 @@ async function withLoader(fn) {
 
 function binStr(u8) { let s = '', CH = 0x8000; for (let i = 0; i < u8.length; i += CH) s += String.fromCharCode.apply(null, u8.subarray(i, i + CH)); return s; }
 
-async function upload() {
+// Thrown for a pre-flight problem with the plan itself (too many clips, over
+// budget) — distinct from a real flashing/hardware failure, so upload() can
+// report it without implying the connection or board is broken.
+class PlanError extends Error {}
+
+// Build what a flash write needs to APPEND the local (staged) clips after
+// whatever a board directory (`existingBoard`) already lists, without
+// touching the bytes of clips already there. Passing an empty board
+// ({count:0, clips:[]}) collapses to a from-scratch playlist, which is how
+// "Replace entire board" reuses this same function.
+function buildUploadPlan(existingBoard) {
+  const eb = existingBoard || { count: 0, clips: [] };
+  const existing = eb.clips || [];
+  const newBlobs = clips.map(getClipBlob);
+  const totalCount = existing.length + clips.length;
+  // CLIP_DATA_START (4096B) doubles as the flash erase-sector size. Rounding
+  // the append offset up to a multiple of it guarantees this write never
+  // shares — and therefore never erases — a sector that already holds bytes
+  // from a previously-flashed clip.
+  const startOff = Math.ceil(dataEndOffset(eb) / CLIP_DATA_START) * CLIP_DATA_START;
+  let off = startOff;
+  const newEntries = clips.map((clip, i) => {
+    const entry = { name: clip.name.slice(0, 24), offset: off, size: newBlobs[i].length };
+    off += newBlobs[i].length;
+    return entry;
+  });
+  const payload = new Uint8Array(off - startOff);
+  let p = 0; for (const b of newBlobs) { payload.set(b, p); p += b.length; }
+
+  const header = new Uint8Array(CLIP_DATA_START);
+  const dv = new DataView(header.buffer);
+  const ssid = ($('ssid').value || 'T-Display-S3').slice(0, 32);
+  header.set([0x54,0x44,0x50,0x4C], 0);                 // "TDPL"
+  dv.setUint8(4, 1); dv.setUint8(5, totalCount); dv.setUint8(6, 0); dv.setUint8(7, 0);
+  dv.setUint8(8, 1); dv.setUint8(9, ssid.length); dv.setUint8(10, 0);
+  for (let i = 0; i < ssid.length; i++) header[12 + i] = ssid.charCodeAt(i);
+  existing.concat(newEntries).forEach((e, i) => {
+    const eo = DIR_OFFSET + i * DIR_ENTRY;
+    dv.setUint32(eo, e.offset, true); dv.setUint32(eo + 4, e.size, true);
+    const nm = (e.name || '').slice(0, 24);
+    for (let k = 0; k < nm.length; k++) header[eo + 8 + k] = nm.charCodeAt(k);
+  });
+  return { header, payload, payloadAddr: MEDIA_OFFSET + startOff, totalCount, totalUsed: off };
+}
+
+async function upload(opts) {
   if (serial.busy) return;
   if (!clips.length) return;
   if (!serial.port) { await connect(); if (!serial.port) return; }
+  const replace = !!(opts && opts.replace);
+  if (replace && !confirm('This erases everything currently on the board and flashes only the clips in the panel on the left. Continue?')) return;
   let uploadedOk = false;
   serial.busy = true;
-  $('uploadBtn').disabled = true; $('connectBtn').disabled = true;
+  $('uploadBtn').disabled = true; $('connectBtn').disabled = true; const rb0 = $('replaceBtn'); if (rb0) rb0.disabled = true;
   setSerial('busy', 'Flashing…'); showProgress(true); setProgress(0, 'Preparing…');
+  let existingBoard = { count: 0, clips: [] };
   try {
-    const fileArray = [];
-    if ($('doFw').checked) { for (const p of window.PLAYER_FIRMWARE) fileArray.push({ data: atob(p.data), address: p.offset }); log(`Queued player firmware.`); }
-    const media = packPlaylist();
-    fileArray.push({ data: binStr(media), address: MEDIA_OFFSET });
-    log(`Queued playlist: ${clips.length} clips, ${(media.length/1e6).toFixed(2)} MB.`);
-    const sizes = fileArray.map(f => f.data.length), grand = sizes.reduce((a,b)=>a+b,0);
-    const before = idx => sizes.slice(0, idx).reduce((a,b)=>a+b,0);
-    setProgress(0, 'Connecting…');
     await withLoader(async (loader) => {
+      if (!replace) {
+        setProgress(0, 'Checking board…');
+        try {
+          const hd = await loader.readFlash(MEDIA_OFFSET, CLIP_DATA_START);
+          existingBoard = parseBoard(hd);
+          board = existingBoard;   // keep the rest of the UI (budget meter, etc.) in sync
+        } catch (e) { log('Could not read the board\'s current contents (' + (e.message||e) + '); flashing as a fresh playlist.'); }
+      }
+      const plan = buildUploadPlan(existingBoard);
+      if (plan.totalCount > MAX_CLIPS) throw new PlanError(`Board would have ${plan.totalCount} clips; max is ${MAX_CLIPS}. Remove some first.`);
+      if (plan.totalUsed > MEDIA_MAX) throw new PlanError(`Playlist would be ${(plan.totalUsed/1e6).toFixed(2)} MB, over the ${(MEDIA_MAX/1e6).toFixed(1)} MB budget.`);
+
+      const fileArray = [];
+      if ($('doFw').checked) { for (const p of window.PLAYER_FIRMWARE) fileArray.push({ data: atob(p.data), address: p.offset }); log('Queued player firmware.'); }
+      fileArray.push({ data: binStr(plan.header), address: MEDIA_OFFSET });
+      if (plan.payload.length) fileArray.push({ data: binStr(plan.payload), address: plan.payloadAddr });
+
+      if (replace || !existingBoard.count) log(`Queued playlist: ${clips.length} clip${clips.length!==1?'s':''}, ${(plan.totalUsed/1e6).toFixed(2)} MB.`);
+      else log(`Queued ${clips.length} new clip${clips.length!==1?'s':''} to append to ${existingBoard.count} already on the board (${(plan.totalUsed/1e6).toFixed(2)} MB total).`);
+
+      const sizes = fileArray.map(f => f.data.length), grand = sizes.reduce((a,b)=>a+b,0);
+      const before = idx => sizes.slice(0, idx).reduce((a,b)=>a+b,0);
+      setProgress(0, 'Connecting…');
       await loader.writeFlash({
         fileArray, flashSize: 'keep', eraseAll: false, compress: true,
         reportProgress: (idx, written, total) => {
@@ -559,11 +657,26 @@ async function upload() {
     log('✅ Upload complete. Board boots clip 1; join WiFi to switch.');
     uploadedOk = true;
   } catch (e) {
-    setSerial('err', 'Flash failed'); progressError('Flash failed — see log');
-    log('❌ ' + (e && e.message ? e.message : e));
-    log('Tip: unplug/replug, or hold BOOT + tap RST, then Connect again.');
-    serial.port = null; serial.connected = false;
-  } finally { serial.busy = false; $('connectBtn').disabled = false; updateBudget(); if (uploadedOk) setTimeout(readBoard, 400); }
+    if (e instanceof PlanError) {
+      setSerial('ok', 'Connected'); progressError('Cannot upload — see log'); log('❌ ' + e.message);
+    } else {
+      setSerial('err', 'Flash failed'); progressError('Flash failed — see log');
+      log('❌ ' + (e && e.message ? e.message : e));
+      log('Tip: unplug/replug, or hold BOOT + tap RST, then Connect again.');
+      serial.port = null; serial.connected = false;
+    }
+  } finally {
+    serial.busy = false; $('connectBtn').disabled = false;
+    if (uploadedOk) {
+      // These clips are now committed to the board — clear the staging list
+      // so the next drop starts a fresh "add to board" batch instead of
+      // re-appending the same clips on top of themselves next time.
+      clips.length = 0; active = -1; ui.processed = [];
+      paintClear(); $('frameLabel').textContent = '0 frames'; renderPlaylist();
+    }
+    updateBudget();
+    if (uploadedOk) setTimeout(readBoard, 400);
+  }
 }
 
 // ==========================================================================
@@ -656,7 +769,7 @@ function renderBoard() {
 
 async function deleteFromBoard(index) {
   if (!board || !board.raw || serial.busy) return;
-  if (!confirm(`Delete "${board.clips[index].name}" from the board?\n(Its space is reclaimed on your next full upload.)`)) return;
+  if (!confirm(`Delete "${board.clips[index].name}" from the board?\n(Its space is reclaimed the next time you use "Replace entire board".)`)) return;
   serial.busy = true; setSerial('busy', 'Deleting…');
   try {
     const sector = new Uint8Array(CLIP_DATA_START);
@@ -745,7 +858,8 @@ function initUI() {
 
   $('connectBtn').addEventListener('click', async () => { await connect(); if (serial.port) readBoard(); });
   $('boardRefresh').addEventListener('click', readBoard);
-  $('uploadBtn').addEventListener('click', upload);
+  $('uploadBtn').addEventListener('click', () => upload({ replace: false }));
+  $('replaceBtn').addEventListener('click', () => upload({ replace: true }));
   $('downloadBin').addEventListener('click', () => {
     if (!clips.length) return;
     const blob = new Blob([packPlaylist()], { type: 'application/octet-stream' });
