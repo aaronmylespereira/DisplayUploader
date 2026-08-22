@@ -278,29 +278,38 @@ function renderFrames565(clip) {
   return { frames: out, W, H, n };
 }
 
+// Source file extension (up to 4 chars, lowercase) — stored on the board so the
+// web UI can show "gif"/"png"/etc. Empty for generated clips with no file.
+function srcExt(clip) {
+  const m = (clip && clip.file && clip.file.name || '').match(/\.([^.]+)$/);
+  return m ? m[1].toLowerCase().slice(0, 4) : '';
+}
+
 function packClip(clip) {
-  const edit = clip.edit, { W, H } = clipDims(edit), n = clipFrameCount(clip);
+  const edit = clip.edit, { W, H } = clipDims(edit), n = clipFrameCount(clip), ext = srcExt(clip);
   if (edit.mode === 'mono') return packMonoClip(clip, W, H, n);
   const { frames } = renderFrames565(clip);
-  const raw = packRawClip(frames, edit, W, H, n);
+  const raw = packRawClip(frames, edit, W, H, n, ext);
   if (edit.compress === 'off') { raw._ratio = 1; return raw; }
-  const comp = packCompressedClip(frames, edit, W, H, n);   // null if not worthwhile
+  const comp = packCompressedClip(frames, edit, W, H, n, ext);   // null if not worthwhile
   if (comp && comp.length < raw.length) { comp._ratio = comp.length / raw.length; return comp; }
   raw._ratio = 1; return raw;
 }
 
-function writeClipHeader(buf, fmt, edit, W, H, n, frameBytes) {
+function writeClipHeader(buf, fmt, edit, W, H, n, frameBytes, ext) {
   const dv = new DataView(buf.buffer);
   buf.set([0x54,0x44,0x53,0x31], 0);
   dv.setUint8(4, 1); dv.setUint8(5, fmt); dv.setUint8(6, edit.rotation & 3); dv.setUint8(7, 0);
   dv.setUint16(8, W, true); dv.setUint16(10, H, true);
   dv.setUint16(12, n, true); dv.setUint16(14, Math.round(1000/edit.fps), true);
   dv.setUint32(16, frameBytes, true);
+  const e = (ext || '').slice(0, 4);                 // reserved1[0..3] = source extension
+  for (let i = 0; i < e.length; i++) buf[20 + i] = e.charCodeAt(i);
 }
 
-function packRawClip(frames, edit, W, H, n) {
+function packRawClip(frames, edit, W, H, n, ext) {
   const fb = W * H * 2, buf = new Uint8Array(HEADER_SIZE + fb * n), dv = new DataView(buf.buffer);
-  writeClipHeader(buf, FMT_RGB565, edit, W, H, n, fb);
+  writeClipHeader(buf, FMT_RGB565, edit, W, H, n, fb, ext);
   let off = HEADER_SIZE;
   for (const px of frames) for (let p = 0; p < px.length; p++) { dv.setUint16(off, px[p], true); off += 2; }
   return buf;
@@ -308,7 +317,7 @@ function packRawClip(frames, edit, W, H, n) {
 
 function packMonoClip(clip, W, H, n) {
   const fb = ((W + 7) >> 3) * H, buf = new Uint8Array(HEADER_SIZE + fb * n);
-  writeClipHeader(buf, FMT_MONO1, clip.edit, W, H, n, fb);
+  writeClipHeader(buf, FMT_MONO1, clip.edit, W, H, n, fb, srcExt(clip));
   let off = HEADER_SIZE;
   for (let i = 0; i < n; i++) {
     const img = applyFilters(renderGeometry(clip.srcFrames[i].canvas, clip.edit, W, H), clip.edit, W, H);
@@ -319,7 +328,7 @@ function packMonoClip(clip, W, H, n) {
 
 // Palette + RLE. Returns null when the clip has too many colors to palettize
 // well and no meaningful gain is expected.
-function packCompressedClip(frames, edit, W, H, n) {
+function packCompressedClip(frames, edit, W, H, n, ext) {
   const { palette, mapping } = buildPalette(frames);         // ≤256 colors
   if (!palette) return null;
   const blobs = [];
@@ -331,7 +340,7 @@ function packCompressedClip(frames, edit, W, H, n) {
   const maxBlob = blobs.reduce((a, b) => Math.max(a, b.length), 0);
   const total = HEADER_SIZE + 512 + n * 4 + blobs.reduce((a, b) => a + b.length, 0);
   const buf = new Uint8Array(total), dv = new DataView(buf.buffer);
-  writeClipHeader(buf, FMT_PAL8_RLE, edit, W, H, n, maxBlob);
+  writeClipHeader(buf, FMT_PAL8_RLE, edit, W, H, n, maxBlob, ext);
   for (let i = 0; i < 256; i++) dv.setUint16(HEADER_SIZE + i * 2, palette[i] || 0, true);
   let tableOff = HEADER_SIZE + 512, dataOff = tableOff + n * 4;
   for (let i = 0; i < n; i++) { dv.setUint32(tableOff + i * 4, blobs[i].length, true); buf.set(blobs[i], dataOff); dataOff += blobs[i].length; }
