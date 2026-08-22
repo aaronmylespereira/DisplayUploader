@@ -534,33 +534,63 @@ function segSet(seg, key, val) { document.querySelectorAll('#'+seg+' button').fo
 // ==========================================================================
 // Web Serial + esptool-js flashing
 // ==========================================================================
-const serial = { port: null, connected: false, busy: false };
+const serial = { port: null, connected: false, busy: false, loader: null, transport: null };
 const ESP = () => window.esptooljs;
 const term = { clean() {}, writeLine(d) { log(d); }, write(d) { logInline(d); } };
 
+// Open ONE bootloader session and hold it for the whole connection. The board
+// enters the bootloader exactly once here; it does not reset again until
+// disconnect(). This is the key fix for the ESP32-S3: its native USB
+// re-enumerates on every chip reset, which invalidated the browser's serial
+// port between the old per-operation sessions and made all writes hang.
 async function connect() {
   if (!('serial' in navigator)) { alert('Web Serial needs Chrome or Edge (over http://localhost or file://).'); return; }
+  if (serial.loader) return;                       // already in a session
+  const { ESPLoader, Transport } = ESP();
   try {
     setSerial('busy', 'Requesting port…');
-    serial.port = await navigator.serial.requestPort();
+    if (!serial.port) serial.port = await navigator.serial.requestPort();
+    serial.transport = new Transport(serial.port, false);
+    serial.loader = new ESPLoader({ transport: serial.transport, baudrate: 921600, romBaudrate: 115200, terminal: term });
+    setSerial('busy', 'Entering bootloader…');
+    const chip = await serial.loader.main();        // single reset into the bootloader
     serial.connected = true;
-    setSerial('ok', 'Port selected'); log('Serial port selected.');
-    updateBudget();
-  } catch (e) { setSerial('err', 'No port'); log('Connect cancelled: ' + e.message); }
+    setSerial('ok', 'Connected — ' + chip);
+    log('Connected: ' + chip + '. Session held — the board screen stays blank until you Disconnect (which reboots it).');
+  } catch (e) {
+    setSerial('err', 'Connect failed'); log('Connect failed: ' + (e && e.message ? e.message : e));
+    log('If it won\'t connect: fully quit Chrome to free the port, or hold BOOT + tap RST, then Connect again.');
+    await closeSession(false);
+  }
+  updateBudget(); updateConnBtn();
 }
 
+// Every read/write reuses the single held session — no reset in between.
 async function withLoader(fn) {
-  const { ESPLoader, Transport } = ESP();
-  const transport = new Transport(serial.port, false);
-  const loader = new ESPLoader({ transport, baudrate: 921600, romBaudrate: 115200, terminal: term });
-  const chip = await loader.main();
-  log('Detected: ' + chip);
-  try { await fn(loader); }
-  finally {
-    try { await transport.setRTS(true); await new Promise(r => setTimeout(r, 120)); await transport.setRTS(false); } catch {}
-    try { await transport.disconnect(); } catch {}
-  }
+  if (!serial.loader) { await connect(); if (!serial.loader) throw new Error('Not connected'); }
+  return await fn(serial.loader);
 }
+
+// Tear the session down. reset=true pulses RTS so the board leaves the
+// bootloader and boots its firmware (runs the freshly flashed content). The
+// port is dropped either way, since a reset re-enumerates the S3's USB and a
+// fresh requestPort() on the next Connect is the reliable path.
+async function closeSession(reset) {
+  if (serial.transport) {
+    try { if (reset) { await serial.transport.setRTS(true); await new Promise(r => setTimeout(r, 120)); await serial.transport.setRTS(false); } } catch {}
+    try { await serial.transport.disconnect(); } catch {}
+  }
+  serial.loader = null; serial.transport = null; serial.port = null; serial.connected = false;
+}
+
+async function disconnect() {
+  if (serial.busy) return;
+  await closeSession(true);
+  setSerial('', 'Disconnected — board rebooted'); log('Disconnected. Board reset to run its firmware.');
+  updateBudget(); updateConnBtn();
+}
+
+function updateConnBtn() { const b = $('connectBtn'); if (b) b.textContent = serial.connected ? 'Disconnect ⏻' : 'Connect'; }
 
 function binStr(u8) { let s = '', CH = 0x8000; for (let i = 0; i < u8.length; i += CH) s += String.fromCharCode.apply(null, u8.subarray(i, i + CH)); return s; }
 
@@ -612,7 +642,7 @@ function buildUploadPlan(existingBoard) {
 async function upload(opts) {
   if (serial.busy) return;
   if (!clips.length) return;
-  if (!serial.port) { await connect(); if (!serial.port) return; }
+  if (!serial.loader) { await connect(); if (!serial.loader) return; }
   const replace = !!(opts && opts.replace);
   if (replace && !confirm('This erases everything currently on the board and flashes only the clips in the panel on the left. Continue?')) return;
   let uploadedOk = false;
@@ -663,8 +693,8 @@ async function upload(opts) {
     } else {
       setSerial('err', 'Flash failed'); progressError('Flash failed — see log');
       log('❌ ' + (e && e.message ? e.message : e));
-      log('Tip: unplug/replug, or hold BOOT + tap RST, then Connect again.');
-      serial.port = null; serial.connected = false;
+      log('Tip: fully quit Chrome to free the port, or hold BOOT + tap RST, then Connect again.');
+      await closeSession(false);
     }
   } finally {
     serial.busy = false; $('connectBtn').disabled = false;
@@ -674,9 +704,9 @@ async function upload(opts) {
       // re-appending the same clips on top of themselves next time.
       clips.length = 0; active = -1; ui.processed = [];
       paintClear(); $('frameLabel').textContent = '0 frames'; renderPlaylist();
+      await disconnect();   // reboot the board so it runs the new playlist
     }
-    updateBudget();
-    if (uploadedOk) setTimeout(readBoard, 400);
+    updateBudget(); updateConnBtn();
   }
 }
 
@@ -687,7 +717,7 @@ async function upload(opts) {
 async function flashFirmwareOnly() {
   if (serial.busy) return;
   if (!window.PLAYER_FIRMWARE || !window.PLAYER_FIRMWARE.length) { alert('No firmware is bundled with this build.'); return; }
-  if (!serial.port) { await connect(); if (!serial.port) return; }
+  if (!serial.loader) { await connect(); if (!serial.loader) return; }
   if (!confirm('Flash the player firmware only?\nAll media currently on the board is kept.')) return;
   let ok = false;
   serial.busy = true;
@@ -717,12 +747,12 @@ async function flashFirmwareOnly() {
   } catch (e) {
     setSerial('err', 'Flash failed'); progressError('Flash failed — see log');
     log('❌ ' + (e && e.message ? e.message : e));
-    log('Tip: unplug/replug, or hold BOOT + tap RST, then Connect again.');
-    serial.port = null; serial.connected = false;
+    log('Tip: fully quit Chrome to free the port, or hold BOOT + tap RST, then Connect again.');
+    await closeSession(false);
   } finally {
     serial.busy = false; $('connectBtn').disabled = false;
-    updateBudget();
-    if (ok) setTimeout(readBoard, 400);
+    if (ok) await disconnect();   // reboot the board so it runs the new firmware
+    updateBudget(); updateConnBtn();
   }
 }
 
@@ -777,7 +807,7 @@ async function loadBoardThumb(loader, clip) {
 }
 
 async function readBoard() {
-  if (!serial.port || serial.busy) return;
+  if (!serial.loader || serial.busy) return;
   serial.busy = true; setSerial('busy', 'Reading board…');
   $('boardStrip').style.display = ''; $('boardList').innerHTML = '<div class="small muted">Reading playlist…</div>';
   try {
@@ -903,7 +933,10 @@ function initUI() {
 
   ['vStart','vEnd'].forEach(id => $(id).addEventListener('change', () => { const ed = E(); if (!ed) return; ed.vStart = parseFloat($('vStart').value)||0; ed.vEnd = parseFloat($('vEnd').value)||0; reprocessActiveVideo(); }));
 
-  $('connectBtn').addEventListener('click', async () => { await connect(); if (serial.port) readBoard(); });
+  $('connectBtn').addEventListener('click', async () => {
+    if (serial.connected) { await disconnect(); }
+    else { await connect(); if (serial.connected) await readBoard(); }
+  });
   $('boardRefresh').addEventListener('click', readBoard);
   $('uploadBtn').addEventListener('click', () => upload({ replace: false }));
   $('replaceBtn').addEventListener('click', () => upload({ replace: true }));
