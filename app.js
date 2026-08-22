@@ -996,6 +996,39 @@ async function deleteFromBoard(index) {
   updateBudget();         // refresh the left-panel upload budget with the reclaimed space
 }
 
+// Wipe every clip off the board. Like deleteFromBoard this only has to rewrite
+// the 4 KB directory sector — an empty playlist (count 0) means nothing plays
+// and all the old data bytes are treated as free space — so it's near-instant,
+// no clip data is read or transferred.
+async function clearBoard() {
+  if (serial.busy) return;
+  if (!serial.loader) { await connect(); if (!serial.loader) return; }
+  if (!board || !board.count) { log('Board is already empty.'); await readBoard(); return; }
+  if (!confirm(`Delete ALL ${board.count} clip${board.count!==1?'s':''} on the board?\nThis empties the playlist and frees all its space.`)) return;
+  serial.busy = true; setSerial('busy', 'Clearing board…'); showProgress(true); setProgress(0, 'Clearing…');
+  try {
+    const header = new Uint8Array(CLIP_DATA_START);
+    const dv = new DataView(header.buffer);
+    const ssid = (board.ssid || 'T-Display-S3').slice(0, 32);
+    header.set([0x54,0x44,0x50,0x4C], 0);              // "TDPL"
+    dv.setUint8(4, 1); dv.setUint8(5, 0); dv.setUint8(6, 0); dv.setUint8(7, 0);   // count = 0
+    dv.setUint8(8, 1); dv.setUint8(9, ssid.length); dv.setUint8(10, 0);
+    for (let i = 0; i < ssid.length; i++) header[12 + i] = ssid.charCodeAt(i);
+    await withLoader(async (loader) => {
+      await loader.writeFlash({
+        fileArray: [{ data: binStr(header), address: MEDIA_OFFSET }],
+        flashSize: 'keep', eraseAll: false, compress: true,
+        reportProgress: (_idx, written, t) => setProgress(Math.round((written / t) * 100), 'Clearing…'),
+      });
+    });
+    setProgress(100, 'Board cleared');
+    log('Cleared all clips from the board.');
+  } catch (e) { setSerial('err', 'Clear failed'); progressError('Clear failed — see log'); log('Clear failed: ' + (e.message||e)); serial.busy = false; return; }
+  serial.busy = false;
+  await readBoard();
+  updateBudget();
+}
+
 // ==========================================================================
 // UI helpers + wiring
 // ==========================================================================
@@ -1074,6 +1107,7 @@ function initUI() {
     else { await connect(); if (serial.connected) await readBoard(); }
   });
   $('boardRefresh').addEventListener('click', readBoard);
+  $('boardClear').addEventListener('click', clearBoard);
   $('uploadBtn').addEventListener('click', () => upload({ replace: false }));
   $('replaceBtn').addEventListener('click', () => upload({ replace: true }));
   $('fwOnlyBtn').addEventListener('click', flashFirmwareOnly);

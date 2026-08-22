@@ -156,7 +156,10 @@
     <div id="boardStrip" class="board-strip" style="display:none">
       <div class="board-head">
         <span>On the board <span id="boardCount" class="badge"></span></span>
-        <button class="mini" id="boardRefresh">↻ Refresh</button>
+        <span class="rowbtns" style="margin:0">
+          <button class="mini" id="boardRefresh">↻ Refresh</button>
+          <button class="mini" id="boardClear">🗑 Clear all</button>
+        </span>
       </div>
       <div id="boardUsage" class="small muted" style="margin-bottom:6px"></div>
       <div class="meter" style="height:7px;margin-bottom:10px"><div id="boardUsageBar" class="prog"></div></div>
@@ -256,6 +259,6 @@
 
 <script src="esptool-bundle.js?v=1"></script>
 <script src="player-firmware.js?v=7"></script>
-<script src="app.js?v=12"></script>
+<script src="app.js?v=13"></script>
 </body>
 </html>
