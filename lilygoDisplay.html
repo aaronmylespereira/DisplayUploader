@@ -185,8 +185,14 @@
       <div id="monoControls" style="display:none">
         <label class="row"><span class="k">Threshold</span>
           <input id="thresh" type="range" min="0" max="255" step="1" value="128"><span class="val" id="threshV">128</span></label>
-        <label class="row"><span class="k">Dither</span><input id="dither" type="checkbox"></label>
       </div>
+      <label class="row"><span class="k">Dither</span>
+        <select id="dither">
+          <option value="none">None</option>
+          <option value="ordered">Ordered</option>
+          <option value="floyd">Diffusion</option>
+          <option value="noise">Noise</option>
+        </select></label>
       <label class="row"><span class="k">Invert</span><input id="invert" type="checkbox"></label>
     </div>
 

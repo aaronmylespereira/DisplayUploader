@@ -25,7 +25,7 @@ const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 function defaultEdit() {
   return {
     rotation: 1, fit: 'contain', zoom: 1, rotate: 0, panX: 0, panY: 0,
-    mode: 'color', bright: 0, contrast: 0, thresh: 128, dither: false, invert: false,
+    mode: 'color', bright: 0, contrast: 0, thresh: 128, dither: 'none', invert: false,
     compress: 'auto',   // 'auto' = palette+RLE when it saves, else raw RGB565; 'off' = raw
     fps: 25, maxFrames: 60, vStart: 0, vEnd: 0,
   };
@@ -171,28 +171,73 @@ function applyFilters(img, edit, W, H) {
     d[i] = clamp(r,0,255); d[i+1] = clamp(g,0,255); d[i+2] = clamp(bl,0,255);
   }
   if (edit.mode === 'mono') monochrome(img, edit, W, H);
+  else if (edit.dither && edit.dither !== 'none') colorDither(img, edit, W, H);
   return img;
 }
 
+// 4×4 Bayer matrix (0..15) for the ordered-dither styles. These dithering modes
+// — ordered / diffusion (Floyd–Steinberg) / noise — mirror the ones offered by
+// the color GIF maker (lofi-gifmaker), applied here to both mono and color.
+const BAYER4 = [ [0,8,2,10], [12,4,14,6], [3,11,1,9], [15,7,13,5] ];
+
 function monochrome(img, edit, W, H) {
-  const d = img.data, th = edit.thresh, inv = edit.invert;
-  if (!edit.dither) {
-    for (let i = 0; i < d.length; i += 4) {
-      const l = 0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2];
-      let v = l >= th ? 255 : 0; if (inv) v = 255 - v;
-      d[i] = d[i+1] = d[i+2] = v;
-    }
-    return;
-  }
+  const d = img.data, th = edit.thresh, inv = edit.invert, mode = edit.dither;
   const lum = new Float32Array(W * H);
   for (let p = 0, i = 0; p < W*H; p++, i += 4) lum[p] = 0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2];
-  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
-    const p = y*W + x, old = lum[p], nv = old >= th ? 255 : 0, err = old - nv;
-    lum[p] = nv;
-    if (x+1 < W) lum[p+1] += err*7/16;
-    if (y+1 < H) { if (x>0) lum[p+W-1] += err*3/16; lum[p+W] += err*5/16; if (x+1<W) lum[p+W+1] += err*1/16; }
+  const bit = new Uint8Array(W * H);
+  if (mode === 'ordered') {
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      const t = th + ((BAYER4[y&3][x&3] + 0.5) / 16 * 255 - 127.5);
+      bit[y*W+x] = lum[y*W+x] >= t ? 1 : 0;
+    }
+  } else if (mode === 'noise') {
+    for (let p = 0; p < lum.length; p++) bit[p] = (lum[p] + (Math.random()*2-1)*90) >= th ? 1 : 0;
+  } else if (mode === 'floyd') {
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      const p = y*W + x, old = lum[p], on = old >= th ? 1 : 0, err = old - (on ? 255 : 0);
+      bit[p] = on;
+      if (x+1 < W) lum[p+1] += err*7/16;
+      if (y+1 < H) { if (x>0) lum[p+W-1] += err*3/16; lum[p+W] += err*5/16; if (x+1<W) lum[p+W+1] += err*1/16; }
+    }
+  } else {                                                   // 'none' — plain threshold
+    for (let p = 0; p < lum.length; p++) bit[p] = lum[p] >= th ? 1 : 0;
   }
-  for (let p = 0, i = 0; p < W*H; p++, i += 4) { let v = lum[p] >= 128 ? 255 : 0; if (inv) v = 255 - v; d[i]=d[i+1]=d[i+2]=v; }
+  for (let p = 0, i = 0; p < W*H; p++, i += 4) { let v = bit[p] ? 255 : 0; if (inv) v = 255 - v; d[i]=d[i+1]=d[i+2]=v; }
+}
+
+// Dither the RGB channels onto the RGB565 grid the panel actually displays,
+// using the same ordered / diffusion / noise techniques as the color GIF maker.
+// Doing it here (in applyFilters) keeps the live preview WYSIWYG with the encode,
+// which snaps to these very same levels in renderFrames565().
+function colorDither(img, edit, W, H) {
+  const d = img.data, mode = edit.dither;
+  ditherChannelInPlace(d, 0, W, H, mode, 0xF8, 8);   // R: 5-bit → step 8
+  ditherChannelInPlace(d, 1, W, H, mode, 0xFC, 4);   // G: 6-bit → step 4
+  ditherChannelInPlace(d, 2, W, H, mode, 0xF8, 8);   // B: 5-bit → step 8
+}
+
+// One RGBA channel (`off` = 0/1/2), snapped to a bit-mask grid (`mask`/`step`)
+// with the chosen dither. The panel decodes a channel byte as (byte & mask), so
+// snapping to exactly that is what lines the preview up with on-device output.
+function ditherChannelInPlace(d, off, W, H, mode, mask, step) {
+  const snap = (v) => clamp(v, 0, 255) & mask;
+  if (mode === 'ordered') {
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      const i = (y*W + x)*4 + off, bias = ((BAYER4[y&3][x&3] + 0.5) / 16 - 0.5) * step;
+      d[i] = snap(d[i] + bias);
+    }
+  } else if (mode === 'noise') {
+    for (let p = 0, i = off; p < W*H; p++, i += 4) d[i] = snap(d[i] + (Math.random()*2-1)*step);
+  } else if (mode === 'floyd') {
+    const work = new Float32Array(W*H);
+    for (let p = 0; p < W*H; p++) work[p] = d[p*4 + off];
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      const p = y*W + x, old = work[p], q = snap(old), err = old - q;
+      d[p*4 + off] = q;
+      if (x+1 < W) work[p+1] += err*7/16;
+      if (y+1 < H) { if (x>0) work[p+W-1] += err*3/16; work[p+W] += err*5/16; if (x+1<W) work[p+W+1] += err*1/16; }
+    }
+  }
 }
 
 // ---- Render the ACTIVE clip for preview ----------------------------------
@@ -526,7 +571,7 @@ function loadControls(edit) {
   setRange('thresh', edit.thresh, v => ''+v);
   setRange('fps', edit.fps, v => v+' fps');
   setRange('maxFrames', edit.maxFrames, v => ''+v);
-  $('dither').checked = edit.dither; $('invert').checked = edit.invert;
+  $('dither').value = edit.dither; $('invert').checked = edit.invert;
 }
 function setRange(id, val, fmt) { const el = $(id); el.value = val; const l = $(id+'V'); if (l) l.textContent = fmt ? fmt(parseFloat(val)) : val; }
 function segSet(seg, key, val) { document.querySelectorAll('#'+seg+' button').forEach(b => b.classList.toggle('on', b.dataset[key] === val)); }
@@ -844,24 +889,58 @@ function renderBoard() {
   });
 }
 
+// Delete a clip AND reclaim its space. The old behavior only rewrote the
+// directory sector, leaving the clip's bytes stranded in flash (a hole that
+// only "Replace entire board" ever cleaned up). Here we read back every
+// surviving clip, repack them contiguously from CLIP_DATA_START — mirroring the
+// from-scratch layout in packPlaylist() — and rewrite the whole media image, so
+// the freed bytes actually return to the budget and every memory readout
+// (board strip + upload budget) reflects the smaller playlist immediately.
 async function deleteFromBoard(index) {
   if (!board || !board.raw || serial.busy) return;
-  if (!confirm(`Delete "${board.clips[index].name}" from the board?\n(Its space is reclaimed the next time you use "Replace entire board".)`)) return;
-  serial.busy = true; setSerial('busy', 'Deleting…');
+  const removed = board.clips[index];
+  if (!confirm(`Delete "${removed.name}" from the board?\nIts ${(removed.size/1e6).toFixed(2)} MB is reclaimed now and the remaining clips are repacked.`)) return;
+  serial.busy = true; setSerial('busy', 'Deleting…'); showProgress(true); setProgress(0, 'Reading remaining clips…');
   try {
-    const sector = new Uint8Array(CLIP_DATA_START);
-    sector.set(board.raw.subarray(0, CLIP_DATA_START));
-    const count = sector[5];
-    for (let i = index; i < count - 1; i++) sector.copyWithin(DIR_OFFSET + i*DIR_ENTRY, DIR_OFFSET + (i+1)*DIR_ENTRY, DIR_OFFSET + (i+2)*DIR_ENTRY);
-    sector.fill(0, DIR_OFFSET + (count-1)*DIR_ENTRY, DIR_OFFSET + count*DIR_ENTRY);
-    sector[5] = count - 1;
+    const survivors = board.clips.filter((_, i) => i !== index);
     await withLoader(async (loader) => {
-      await loader.writeFlash({ fileArray: [{ data: binStr(sector), address: MEDIA_OFFSET }], flashSize: 'keep', eraseAll: false, compress: true });
+      // Pull each surviving clip's bytes off the board so we can repack them.
+      const blobs = [];
+      for (let i = 0; i < survivors.length; i++) {
+        setProgress(Math.round((i / Math.max(survivors.length, 1)) * 50), `Reading clip ${i+1}/${survivors.length}…`);
+        blobs.push(await loader.readFlash(MEDIA_OFFSET + survivors[i].offset, survivors[i].size));
+      }
+      // Rebuild the 4096-byte directory sector + a contiguous data payload with
+      // fresh offsets, identical in shape to a "Replace entire board" write.
+      const total = CLIP_DATA_START + blobs.reduce((a, b) => a + b.length, 0);
+      const out = new Uint8Array(total);
+      const dv = new DataView(out.buffer);
+      const ssid = (board.ssid || 'T-Display-S3').slice(0, 32);
+      out.set([0x54,0x44,0x50,0x4C], 0);                 // "TDPL"
+      dv.setUint8(4, 1); dv.setUint8(5, survivors.length); dv.setUint8(6, 0); dv.setUint8(7, 0);
+      dv.setUint8(8, 1); dv.setUint8(9, ssid.length); dv.setUint8(10, 0);
+      for (let i = 0; i < ssid.length; i++) out[12 + i] = ssid.charCodeAt(i);
+      let off = CLIP_DATA_START;
+      survivors.forEach((clip, i) => {
+        const e = DIR_OFFSET + i * DIR_ENTRY;
+        dv.setUint32(e, off, true); dv.setUint32(e + 4, blobs[i].length, true);
+        const nm = (clip.name || '').slice(0, 24);
+        for (let k = 0; k < nm.length; k++) out[e + 8 + k] = nm.charCodeAt(k);
+        out.set(blobs[i], off); off += blobs[i].length;
+      });
+      setProgress(60, 'Writing compacted playlist…');
+      await loader.writeFlash({
+        fileArray: [{ data: binStr(out), address: MEDIA_OFFSET }],
+        flashSize: 'keep', eraseAll: false, compress: true,
+        reportProgress: (_idx, written, t) => setProgress(60 + Math.round((written / t) * 40), 'Writing compacted playlist…'),
+      });
     });
-    log(`Deleted clip ${index+1} from the board.`);
-  } catch (e) { setSerial('err', 'Delete failed'); log('Delete failed: ' + (e.message||e)); serial.busy = false; return; }
+    setProgress(100, 'Deleted');
+    log(`Deleted "${removed.name}" and repacked ${survivors.length} remaining clip${survivors.length!==1?'s':''} — ${(removed.size/1e6).toFixed(2)} MB reclaimed.`);
+  } catch (e) { setSerial('err', 'Delete failed'); progressError('Delete failed — see log'); log('Delete failed: ' + (e.message||e)); serial.busy = false; return; }
   serial.busy = false;
-  await readBoard();
+  await readBoard();      // refresh board strip + storage meter from flash
+  updateBudget();         // refresh the left-panel upload budget with the reclaimed space
 }
 
 // ==========================================================================
@@ -916,7 +995,7 @@ function initUI() {
   bindRange('thresh', 'thresh', v => ''+v);
   bindRange('fps', 'fps', v => v+' fps', reprocessActiveVideo);
   bindRange('maxFrames', 'maxFrames', v => ''+v, reprocessActiveVideo);
-  $('dither').addEventListener('change', e => { const ed = E(); if (ed) { ed.dither = e.target.checked; rebuild(); } });
+  $('dither').addEventListener('change', e => { const ed = E(); if (ed) { ed.dither = e.target.value; rebuild(); } });
   $('invert').addEventListener('change', e => { const ed = E(); if (ed) { ed.invert = e.target.checked; rebuild(); } });
 
   $('rot90').addEventListener('click', () => { const ed = E(); if (!ed) return; ed.rotate = ((ed.rotate + 90 + 180) % 360) - 180; setRange('rot', ed.rotate, v=>v+'°'); rebuild(); });
