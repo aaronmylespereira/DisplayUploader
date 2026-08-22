@@ -176,13 +176,17 @@ function renderGeometry(srcCanvas, edit, W, H) {
 
 function applyFilters(img, edit, W, H) {
   const d = img.data, n = d.length;
-  const b = edit.bright * 2.55;
-  const cf = (259 * (edit.contrast + 255)) / (255 * (259 - edit.contrast));
   const colorInvert = edit.invert && edit.mode === 'color';
-  for (let i = 0; i < n; i += 4) {
-    let r = cf*(d[i]-128)+128+b, g = cf*(d[i+1]-128)+128+b, bl = cf*(d[i+2]-128)+128+b;
-    if (colorInvert) { r = 255-r; g = 255-g; bl = 255-bl; }
-    d[i] = clamp(r,0,255); d[i+1] = clamp(g,0,255); d[i+2] = clamp(bl,0,255);
+  // Brightness 0 + contrast 0 is the identity map, so skip the whole-image pass
+  // in the common default case (unless we still need to invert color pixels).
+  if (edit.bright !== 0 || edit.contrast !== 0 || colorInvert) {
+    const b = edit.bright * 2.55;
+    const cf = (259 * (edit.contrast + 255)) / (255 * (259 - edit.contrast));
+    for (let i = 0; i < n; i += 4) {
+      let r = cf*(d[i]-128)+128+b, g = cf*(d[i+1]-128)+128+b, bl = cf*(d[i+2]-128)+128+b;
+      if (colorInvert) { r = 255-r; g = 255-g; bl = 255-bl; }
+      d[i] = clamp(r,0,255); d[i+1] = clamp(g,0,255); d[i+2] = clamp(bl,0,255);
+    }
   }
   if (edit.blockSize > 1) pixelate(img, edit.blockSize, W, H);
   if (edit.mode === 'mono') monochrome(img, edit, W, H);
@@ -249,6 +253,12 @@ function colorDither(img, edit, W, H) {
   ditherChannelInPlace(d, 2, W, H, mode, 0xF8, 8);   // B: 5-bit → step 8
 }
 
+// Scratch buffer for Floyd error diffusion, grown on demand and reused. Each
+// ditherChannelInPlace call uses it start-to-finish before the next, so a single
+// shared buffer is safe and spares a per-channel/per-frame allocation.
+let _ditherScratch = null;
+function ditherScratch(n) { if (!_ditherScratch || _ditherScratch.length < n) _ditherScratch = new Float32Array(n); return _ditherScratch; }
+
 // One RGBA channel (`off` = 0/1/2), snapped to a bit-mask grid (`mask`/`step`)
 // with the chosen dither. The panel decodes a channel byte as (byte & mask), so
 // snapping to exactly that is what lines the preview up with on-device output.
@@ -262,7 +272,7 @@ function ditherChannelInPlace(d, off, W, H, mode, mask, step) {
   } else if (mode === 'noise') {
     for (let p = 0, i = off; p < W*H; p++, i += 4) d[i] = snap(d[i] + (Math.random()*2-1)*step);
   } else if (mode === 'floyd') {
-    const work = new Float32Array(W*H);
+    const work = ditherScratch(W*H);   // reused across channels/frames — avoids 3 big allocs per frame
     for (let p = 0; p < W*H; p++) work[p] = d[p*4 + off];
     for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
       const p = y*W + x, old = work[p], q = snap(old), err = old - q;
@@ -403,7 +413,7 @@ function packCompressedClip(frames, edit, W, H, n) {
   const blobs = [];
   const idx = new Uint8Array(W * H), tmp = new Uint8Array(W * H * 2);
   for (const px of frames) {
-    for (let p = 0; p < px.length; p++) idx[p] = mapping.get(px[p]);
+    for (let p = 0; p < px.length; p++) idx[p] = mapping[px[p]];
     blobs.push(rleEncode(idx, tmp));
   }
   const maxBlob = blobs.reduce((a, b) => Math.max(a, b.length), 0);
@@ -425,34 +435,39 @@ function rleEncode(idx, scratch) {
 
 // Build a ≤256-entry RGB565 palette. Lossless if the clip already has ≤256
 // colors; otherwise median-cut quantization. Returns {palette:Uint16Array(256),
-// mapping:Map(color565->index)}.
+// mapping:Uint16Array(65536) color565->index}. A flat 65536-bucket histogram and
+// a flat lookup replace the old Map/Map.get (RGB565 is only 16 bits wide), and
+// each box's split-range is cached instead of rescanned on every iteration.
 function buildPalette(frames) {
-  const hist = new Map();
-  for (const px of frames) for (let p = 0; p < px.length; p++) hist.set(px[p], (hist.get(px[p]) || 0) + 1);
-  const palette = new Uint16Array(256), mapping = new Map();
-  if (hist.size <= 256) {
-    let i = 0; for (const c of hist.keys()) { palette[i] = c; mapping.set(c, i); i++; }
+  const hist = new Uint32Array(65536);
+  const order = [];   // colors in first-appearance order — same sequence the old Map yielded, which median cut's stable sort tie-breaks on
+  for (const px of frames) for (let p = 0; p < px.length; p++) { if (hist[px[p]]++ === 0) order.push(px[p]); }
+  const unique = order.length;
+  const palette = new Uint16Array(256), mapping = new Uint16Array(65536);
+  if (unique <= 256) {
+    for (let i = 0; i < unique; i++) { const c = order[i]; palette[i] = c; mapping[c] = i; }
     return { palette, mapping };
   }
   // median cut over unique colors (weighted by count)
-  const cols = [];
-  for (const [c, cnt] of hist) cols.push({ c, r: ((c>>11)&0x1f)<<3, g: ((c>>5)&0x3f)<<2, b: (c&0x1f)<<3, count: cnt });
-  let boxes = [cols];
+  const cols = new Array(unique);
+  for (let j = 0; j < unique; j++) { const c = order[j]; cols[j] = { c, r: ((c>>11)&0x1f)<<3, g: ((c>>5)&0x3f)<<2, b: (c&0x1f)<<3, count: hist[c] }; }
+  const boxes = [cols], ranges = [boxRange(cols)];   // ranges[k] cached for boxes[k]
   while (boxes.length < 256) {
     let bi = -1, best = -1;
-    for (let k = 0; k < boxes.length; k++) { if (boxes[k].length < 2) continue; const r = boxRange(boxes[k]).span; if (r > best) { best = r; bi = k; } }
+    for (let k = 0; k < boxes.length; k++) { if (boxes[k].length < 2) continue; if (ranges[k].span > best) { best = ranges[k].span; bi = k; } }
     if (bi < 0) break;
-    const box = boxes[bi], ch = boxRange(box).channel;
+    const box = boxes[bi], ch = ranges[bi].channel;
     box.sort((a, b) => a[ch] - b[ch]);
-    const mid = box.length >> 1;
-    boxes.splice(bi, 1, box.slice(0, mid), box.slice(mid));
+    const mid = box.length >> 1, lo = box.slice(0, mid), hi = box.slice(mid);
+    boxes.splice(bi, 1, lo, hi);
+    ranges.splice(bi, 1, boxRange(lo), boxRange(hi));
   }
   boxes.forEach((box, i) => {
     let r = 0, g = 0, b = 0, w = 0;
     for (const c of box) { r += c.r*c.count; g += c.g*c.count; b += c.b*c.count; w += c.count; }
     r = Math.round(r/w); g = Math.round(g/w); b = Math.round(b/w);
     palette[i] = ((r&0xF8)<<8)|((g&0xFC)<<3)|(b>>3);
-    for (const c of box) mapping.set(c.c, i);
+    for (const c of box) mapping[c.c] = i;
   });
   return { palette, mapping };
 }
