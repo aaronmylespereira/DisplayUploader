@@ -224,6 +224,11 @@
       <div class="hint" style="margin:0 0 10px">Erases everything currently on the board and flashes only the clips in the panel on the left.</div>
       <label class="row"><span class="k">Also (re)install player firmware</span><input id="doFw" type="checkbox"></label>
       <div class="hint">First-time boards need the firmware once. After that, just Add media.</div>
+      <div class="divider"></div>
+      <div class="rowbtns" style="margin-bottom:10px">
+        <button class="btn sec" id="fwOnlyBtn">Install firmware only ⧉</button>
+      </div>
+      <div class="hint" style="margin:0 0 10px">Flashes just the player firmware and keeps all media on the board. Use this to push a firmware update without re-uploading clips.</div>
       <div id="progWrap" style="display:none;margin:10px 0 4px">
         <div class="meter" style="height:11px"><div id="progBar" class="prog"></div></div>
         <div class="small muted" id="progText" style="margin-top:5px">—</div>
@@ -238,7 +243,7 @@
 </div>
 
 <script src="esptool-bundle.js?v=1"></script>
-<script src="player-firmware.js?v=6"></script>
-<script src="app.js?v=8"></script>
+<script src="player-firmware.js?v=7"></script>
+<script src="app.js?v=9"></script>
 </body>
 </html>

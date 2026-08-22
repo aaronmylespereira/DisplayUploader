@@ -455,6 +455,7 @@ function updateBudget() {
   else warn.style.display = 'none';
   $('uploadBtn').disabled = over || !serial.connected || clips.length === 0;
   const rb = $('replaceBtn'); if (rb) rb.disabled = !serial.connected || clips.length === 0;
+  const fb = $('fwOnlyBtn');  if (fb) fb.disabled = serial.busy;   // works with or without staged clips
 }
 
 // ==========================================================================
@@ -679,6 +680,52 @@ async function upload(opts) {
   }
 }
 
+// Flash ONLY the player firmware partitions (bootloader, partition table,
+// boot_app0, app). The "media" data partition is never addressed, so every clip
+// already on the board is preserved — this is the "update firmware, keep media"
+// path. Reuses the same connection + writeFlash plumbing as upload().
+async function flashFirmwareOnly() {
+  if (serial.busy) return;
+  if (!window.PLAYER_FIRMWARE || !window.PLAYER_FIRMWARE.length) { alert('No firmware is bundled with this build.'); return; }
+  if (!serial.port) { await connect(); if (!serial.port) return; }
+  if (!confirm('Flash the player firmware only?\nAll media currently on the board is kept.')) return;
+  let ok = false;
+  serial.busy = true;
+  $('uploadBtn').disabled = true; $('connectBtn').disabled = true;
+  const rb0 = $('replaceBtn'); if (rb0) rb0.disabled = true;
+  const fb0 = $('fwOnlyBtn');  if (fb0) fb0.disabled = true;
+  setSerial('busy', 'Flashing firmware…'); showProgress(true); setProgress(0, 'Preparing…');
+  try {
+    await withLoader(async (loader) => {
+      const fileArray = window.PLAYER_FIRMWARE.map(p => ({ data: atob(p.data), address: p.offset }));
+      log(`Queued player firmware only (${fileArray.length} parts) — media partition untouched.`);
+      const sizes = fileArray.map(f => f.data.length), grand = sizes.reduce((a,b)=>a+b,0);
+      const before = idx => sizes.slice(0, idx).reduce((a,b)=>a+b,0);
+      setProgress(0, 'Connecting…');
+      await loader.writeFlash({
+        fileArray, flashSize: 'keep', eraseAll: false, compress: true,
+        reportProgress: (idx, written, total) => {
+          const pct = Math.round(((before(idx)+written)/grand)*100), fp = Math.round((written/total)*100);
+          setProgress(pct, `File ${idx+1}/${fileArray.length} · ${fp}% · ${pct}% total`);
+          setSerial('busy', `Flashing ${pct}%`);
+        },
+      });
+    });
+    setProgress(100, 'Done — board resetting'); setSerial('ok', 'Done — board resetting');
+    log('✅ Firmware updated. All media on the board was preserved.');
+    ok = true;
+  } catch (e) {
+    setSerial('err', 'Flash failed'); progressError('Flash failed — see log');
+    log('❌ ' + (e && e.message ? e.message : e));
+    log('Tip: unplug/replug, or hold BOOT + tap RST, then Connect again.');
+    serial.port = null; serial.connected = false;
+  } finally {
+    serial.busy = false; $('connectBtn').disabled = false;
+    updateBudget();
+    if (ok) setTimeout(readBoard, 400);
+  }
+}
+
 // ==========================================================================
 // Read / delete what's on the board
 // ==========================================================================
@@ -860,6 +907,7 @@ function initUI() {
   $('boardRefresh').addEventListener('click', readBoard);
   $('uploadBtn').addEventListener('click', () => upload({ replace: false }));
   $('replaceBtn').addEventListener('click', () => upload({ replace: true }));
+  $('fwOnlyBtn').addEventListener('click', flashFirmwareOnly);
   $('downloadBin').addEventListener('click', () => {
     if (!clips.length) return;
     const blob = new Blob([packPlaylist()], { type: 'application/octet-stream' });
