@@ -465,6 +465,8 @@ function updateBudget() {
   $('uploadBtn').disabled = over || !serial.connected || clips.length === 0;
   const rb = $('replaceBtn'); if (rb) rb.disabled = !serial.connected || clips.length === 0;
   const fb = $('fwOnlyBtn');  if (fb) fb.disabled = serial.busy;   // works with or without staged clips
+  const pf = $('flashProgBtn'), pfi = $('progFile');
+  if (pf) pf.disabled = serial.busy || !(pfi && pfi.files && pfi.files.length);
 }
 
 // ==========================================================================
@@ -735,6 +737,72 @@ async function flashFirmwareOnly() {
   }
 }
 
+// Append a generative bytecode program (.tdpg blob) to the board as a new
+// directory entry, exactly like appending a clip — the firmware tells clips and
+// programs apart by their blob magic ("TDS1" vs "TDPG"). Kept separate from the
+// clip pipeline so the media path is untouched.
+async function flashProgram(bytes, name) {
+  if (serial.busy) return;
+  if (!(bytes && bytes.length >= 4 && bytes[0]===0x54 && bytes[1]===0x44 && bytes[2]===0x50 && bytes[3]===0x47)) {
+    alert('That is not a .tdpg program (missing "TDPG" header).'); return;
+  }
+  if (!serial.port) { await connect(); if (!serial.port) return; }
+  let ok = false;
+  serial.busy = true;
+  $('uploadBtn').disabled = true; $('connectBtn').disabled = true;
+  const fb = $('flashProgBtn'); if (fb) fb.disabled = true;
+  setSerial('busy', 'Flashing program…'); showProgress(true); setProgress(0, 'Preparing…');
+  try {
+    await withLoader(async (loader) => {
+      let eb = { count: 0, clips: [] };
+      setProgress(0, 'Checking board…');
+      try { eb = parseBoard(await loader.readFlash(MEDIA_OFFSET, CLIP_DATA_START)); board = eb; }
+      catch (e) { log('Could not read the board (' + (e.message||e) + '); flashing as a fresh directory.'); }
+      const existing = eb.clips || [];
+      if (existing.length >= MAX_CLIPS) throw new PlanError(`Board directory is full (${MAX_CLIPS} entries).`);
+      const startOff = Math.ceil(dataEndOffset(eb) / CLIP_DATA_START) * CLIP_DATA_START;
+      const entry = { name: (name || 'program').slice(0, 24), offset: startOff, size: bytes.length };
+
+      const header = new Uint8Array(CLIP_DATA_START), dv = new DataView(header.buffer);
+      const ssid = ($('ssid').value || 'T-Display-S3').slice(0, 32);
+      header.set([0x54,0x44,0x50,0x4C], 0);                       // "TDPL"
+      dv.setUint8(4, 1); dv.setUint8(5, existing.length + 1); dv.setUint8(8, 1);
+      dv.setUint8(9, ssid.length);
+      for (let i = 0; i < ssid.length; i++) header[12 + i] = ssid.charCodeAt(i);
+      existing.concat([entry]).forEach((e, i) => {
+        const eo = DIR_OFFSET + i * DIR_ENTRY;
+        dv.setUint32(eo, e.offset, true); dv.setUint32(eo + 4, e.size, true);
+        const nm = (e.name || '').slice(0, 24);
+        for (let k = 0; k < nm.length; k++) header[eo + 8 + k] = nm.charCodeAt(k);
+      });
+      const fileArray = [
+        { data: binStr(header), address: MEDIA_OFFSET },
+        { data: binStr(bytes),  address: MEDIA_OFFSET + startOff },
+      ];
+      log(`Queued generative program "${entry.name}" (${bytes.length} bytes) after ${existing.length} existing entr${existing.length===1?'y':'ies'}.`);
+      const sizes = fileArray.map(f => f.data.length), grand = sizes.reduce((a,b)=>a+b,0);
+      const before = idx => sizes.slice(0, idx).reduce((a,b)=>a+b,0);
+      setProgress(0, 'Connecting…');
+      await loader.writeFlash({
+        fileArray, flashSize: 'keep', eraseAll: false, compress: true,
+        reportProgress: (idx, written, total) => {
+          const pct = Math.round(((before(idx)+written)/grand)*100);
+          setProgress(pct, `${pct}% total`); setSerial('busy', `Flashing ${pct}%`);
+        },
+      });
+    });
+    setProgress(100, 'Done — board resetting'); setSerial('ok', 'Done — board resetting');
+    log('✅ Program flashed. It appears as a generator (with its sliders) in the web UI.');
+    ok = true;
+  } catch (e) {
+    if (e instanceof PlanError) { setSerial('ok', 'Connected'); progressError('Cannot flash — see log'); log('❌ ' + e.message); }
+    else { setSerial('err', 'Flash failed'); progressError('Flash failed — see log'); log('❌ ' + (e && e.message ? e.message : e)); serial.port = null; serial.connected = false; }
+  } finally {
+    serial.busy = false; $('connectBtn').disabled = false; updateBudget();
+    if (ok) setTimeout(readBoard, 400);
+  }
+}
+
 // ==========================================================================
 // Read / delete what's on the board
 // ==========================================================================
@@ -917,6 +985,12 @@ function initUI() {
   $('uploadBtn').addEventListener('click', () => upload({ replace: false }));
   $('replaceBtn').addEventListener('click', () => upload({ replace: true }));
   $('fwOnlyBtn').addEventListener('click', flashFirmwareOnly);
+  $('progFile').addEventListener('change', (e) => { $('flashProgBtn').disabled = !(e.target.files && e.target.files.length) || serial.busy; });
+  $('flashProgBtn').addEventListener('click', async () => {
+    const f = $('progFile').files[0]; if (!f) return;
+    const bytes = new Uint8Array(await f.arrayBuffer());
+    await flashProgram(bytes, baseName(f.name));
+  });
   $('downloadBin').addEventListener('click', () => {
     if (!clips.length) return;
     const blob = new Blob([packPlaylist()], { type: 'application/octet-stream' });

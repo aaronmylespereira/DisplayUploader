@@ -229,6 +229,12 @@
         <button class="btn sec" id="fwOnlyBtn">Install firmware only ⧉</button>
       </div>
       <div class="hint" style="margin:0 0 10px">Flashes just the player firmware and keeps all media on the board. Use this to push a firmware update without re-uploading clips.</div>
+      <div class="divider"></div>
+      <div class="rowbtns" style="margin-bottom:10px;align-items:center">
+        <input type="file" id="progFile" accept=".tdpg" style="flex:1;min-width:0;font-size:12px">
+        <button class="btn sec" id="flashProgBtn" disabled>Flash generative program ⚙</button>
+      </div>
+      <div class="hint" style="margin:0 0 10px">Appends a generative <b>.tdpg</b> program to the board — it shows up as a generator with live sliders. Author &amp; compile one in <a href="dsl-lab.html" target="_blank" style="color:var(--accent,#4c8dff)">dsl-lab.html</a> (experimental). Media is kept.</div>
       <div id="progWrap" style="display:none;margin:10px 0 4px">
         <div class="meter" style="height:11px"><div id="progBar" class="prog"></div></div>
         <div class="small muted" id="progText" style="margin-top:5px">—</div>
@@ -243,7 +249,7 @@
 </div>
 
 <script src="esptool-bundle.js?v=1"></script>
-<script src="player-firmware.js?v=7"></script>
-<script src="app.js?v=9"></script>
+<script src="player-firmware.js?v=8"></script>
+<script src="app.js?v=10"></script>
 </body>
 </html>

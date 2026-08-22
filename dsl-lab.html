@@ -1,0 +1,243 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>T-Display DSL Lab (Phase 1)</title>
+<!--
+  Phase-1 proof of the generative-DSL path.
+  A generative piece is authored as a PIPELINE of coarse-grained ops (below).
+  This page:
+    1. compiles the pipeline to a compact "TDPG" bytecode (offline, in-browser),
+    2. previews it live by running the SAME bytecode through a JS VM whose ops
+       mirror the on-device C VM one-for-one,
+    3. exports the .tdpg blob to flash to the board.
+  The board ships a C VM (see T-Display-S3-Player.ino) that runs the identical
+  bytecode — so preview == device, and new art never needs a firmware rebuild.
+-->
+<style>
+:root{color-scheme:dark}
+body{font-family:-apple-system,system-ui,sans-serif;background:#0f1216;color:#e6ebf2;margin:0;padding:20px;
+  display:flex;gap:24px;flex-wrap:wrap}
+h1{font-size:18px;margin:0 0 4px;width:100%}
+.sub{color:#8a93a2;font-size:13px;width:100%;margin:-2px 0 8px}
+#stage{background:#000;border:1px solid #232a33;border-radius:10px;image-rendering:pixelated;width:340px;height:640px}
+.panel{min-width:280px;max-width:360px}
+.card{background:#151a21;border:1px solid #232a33;border-radius:10px;padding:14px 16px;margin-bottom:14px}
+.card h2{font-size:13px;margin:0 0 10px;color:#9fb0c3;text-transform:uppercase;letter-spacing:.06em}
+.slider{margin:10px 0}
+.slider label{display:flex;justify-content:space-between;font-size:13px;color:#c9d3df;margin-bottom:4px}
+.slider label b{color:#4c8dff}
+.slider input{width:100%}
+button{background:#1c2530;border:1px solid #2c3644;color:#e6ebf2;border-radius:8px;padding:10px 14px;
+  font-size:14px;cursor:pointer;margin:4px 6px 4px 0}
+button:hover{border-color:#4c8dff}
+.mono{font-family:ui-monospace,Menlo,monospace;font-size:12px;color:#8a93a2;white-space:pre-wrap;word-break:break-all}
+.kv{display:flex;justify-content:space-between;font-size:13px;color:#c9d3df;margin:4px 0}
+.kv b{color:#4c8dff}
+</style>
+<h1>T-Display DSL Lab · Phase 1</h1>
+<div class="sub">Authoring + offline compiler + live preview for the generative bytecode VM. Pipeline → TDPG bytecode → identical JS/device rendering.</div>
+
+<canvas id="stage" width="170" height="320"></canvas>
+
+<div class="panel">
+  <div class="card">
+    <h2>Parameters</h2>
+    <div id="params"></div>
+  </div>
+  <div class="card">
+    <h2>Program</h2>
+    <div class="kv"><span>Name</span><b id="pname">—</b></div>
+    <div class="kv"><span>Bytecode size</span><b id="bsize">—</b></div>
+    <div class="kv"><span>Grid</span><b id="gdims">—</b></div>
+    <button id="regen">↺ Re-generate</button>
+    <button id="dl">⭳ Download .tdpg</button>
+  </div>
+  <div class="card">
+    <h2>Opcodes in this program</h2>
+    <div class="mono" id="ops"></div>
+  </div>
+</div>
+
+<script>
+// ======================================================================
+// Shared bytecode contract (MUST match the C VM in the firmware).
+// ======================================================================
+const MAGIC = [0x54,0x44,0x50,0x47];           // "TDPG"
+const OP = { FBM:1, CONTRAST:2, DITHER:3, SEED:4, CA:5, CAMO:6, NOISE:7,
+             THRESHOLD:8, SORTINIT:9, DRIFT:10, COMPOSE_SORT:11 };
+const OPNAME = Object.fromEntries(Object.entries(OP).map(([k,v])=>[v,k]));
+const K_GRID=0, K_IMM=1, K_PARAM=2;            // operand kinds
+
+// ======================================================================
+// The artwork, authored as a pipeline. (This is "dither-camo" as ops.)
+// ======================================================================
+const G = { fs:0, ca:1, raw:2, tnoise:3, mask:4 };
+const P = { complexity:0, caSteps:1, density:2, drift:3 };
+const g=i=>[K_GRID,i], im=v=>[K_IMM,v], pr=i=>[K_PARAM,i];
+
+const PIPELINE = {
+  name: "Dither Camo",
+  cell: 3, rotation: 0,
+  params: [
+    { id:"complexity", label:"Complexity",   min:1,  max:10, def:5,  reinit:true },
+    { id:"caSteps",    label:"CA steps",      min:3,  max:14, def:6,  reinit:true },
+    { id:"density",    label:"Camo density",  min:20, max:70, def:45, reinit:true },
+    { id:"drift",      label:"Drift speed",   min:0,  max:10, def:3,  reinit:false },
+  ],
+  grids: 5,                                    // all float, cell-resolution
+  init: [
+    [OP.FBM,       g(G.fs),  pr(P.complexity)],
+    [OP.CONTRAST,  g(G.fs),  pr(P.complexity)],
+    [OP.DITHER,    g(G.fs)],
+    [OP.SEED,      g(G.ca)],
+    [OP.CA,        g(G.ca),  pr(P.caSteps)],
+    [OP.CAMO,      g(G.raw)],
+    [OP.NOISE,     g(G.tnoise), im(6)],        // freq = W * 6/100
+    [OP.THRESHOLD, g(G.mask), g(G.raw), g(G.tnoise), pr(P.density)],
+    [OP.SORTINIT],
+  ],
+  frame: [
+    [OP.DRIFT,        g(G.mask), g(G.raw), g(G.tnoise), pr(P.density)],
+    [OP.COMPOSE_SORT, g(G.fs),   g(G.ca),  g(G.mask)],
+  ],
+};
+
+// ======================================================================
+// Compiler: pipeline -> TDPG bytecode (little-endian).
+//   header 12B | params (32B each) | grids (1B each) | init ops | frame ops
+//   op = opcode(1) nOperands(1) [kind(1) val(int16)]*
+// ======================================================================
+function compile(pl){
+  const bytes=[];
+  const u8=v=>bytes.push(v&0xff);
+  const i16=v=>{bytes.push(v&0xff);bytes.push((v>>8)&0xff);};
+  const str=(s,n)=>{for(let i=0;i<n;i++)u8(i<s.length?s.charCodeAt(i):0);};
+  const ops=arr=>{for(const op of arr){u8(op[0]);u8(op.length-1);
+    for(let k=1;k<op.length;k++){u8(op[k][0]);i16(op[k][1]);}}};   // counts live in the header
+  MAGIC.forEach(u8);
+  u8(1); u8(pl.cell); u8(pl.rotation); u8(pl.params.length); u8(pl.grids);
+  // nInit/nFrame written as part of the op blocks; store counts here too:
+  u8(pl.init.length); u8(pl.frame.length); u8(0);
+  for(const p of pl.params){ str(p.id,8); str(p.label,16); i16(p.min); i16(p.max); i16(p.def); u8(p.reinit?1:0); u8(0); }
+  for(let i=0;i<pl.grids;i++) u8(0);           // grid type 0 = float
+  ops(pl.init); ops(pl.frame);
+  return new Uint8Array(bytes);
+}
+
+// ======================================================================
+// JS VM — mirrors the C VM. Runs the compiled bytecode so preview==device.
+// ======================================================================
+function parse(bc){
+  let o=0; const u8=()=>bc[o++]; const i16=()=>{const v=bc[o]|(bc[o+1]<<8);o+=2;return (v<<16)>>16;};
+  const rd=n=>{let s='';for(let i=0;i<n;i++){const c=bc[o++];if(c)s+=String.fromCharCode(c);}return s;};
+  o=4; const ver=u8(), cell=u8(), rot=u8(), nP=u8(), nG=u8(), nInit=u8(), nFrame=u8(); u8();
+  const params=[]; for(let i=0;i<nP;i++){const id=rd(8);const label=rd(16);const mn=i16(),mx=i16(),df=i16(),fl=u8();u8();
+    params.push({id,label,min:mn,max:mx,def:df,reinit:!!(fl&1),val:df});}
+  for(let i=0;i<nG;i++)u8();
+  const readOps=cnt=>{const list=[];for(let i=0;i<cnt;i++){const code=u8(),n=u8(),ops=[];
+    for(let k=0;k<n;k++){ops.push([u8(),i16()]);}list.push([code,...ops]);}return list;};
+  const init=readOps(nInit), frame=readOps(nFrame);
+  return {cell,rot,params,nGrids:nG,init,frame};
+}
+
+// ---- op primitives (float grids at CW*CH) ----
+let VM=null;
+const smooth=t=>t*t*(3-2*t);
+function valueNoise(out,w,h,freq){ if(freq<1)freq=1;
+  const gx=Math.ceil(w/freq)+2, gy=Math.ceil(h/freq)+2, g=new Float32Array(gx*gy);
+  for(let i=0;i<g.length;i++)g[i]=Math.random();
+  for(let y=0;y<h;y++)for(let x=0;x<w;x++){const fx=x/freq,fy=y/freq,ix=fx|0,iy=fy|0,tx=fx-ix,ty=fy-iy;
+    const a=g[iy*gx+ix],b=g[iy*gx+ix+1],c=g[(iy+1)*gx+ix],d=g[(iy+1)*gx+ix+1];
+    const lx=a+(b-a)*smooth(tx),ly=c+(d-c)*smooth(tx); out[y*w+x]=lx+(ly-lx)*smooth(ty);}}
+function fbm(out,w,h,oct,base){out.fill(0);let amp=1,tot=0,freq=base;const n=new Float32Array(w*h);
+  for(let s=0;s<oct;s++){valueNoise(n,w,h,freq);for(let i=0;i<w*h;i++)out[i]+=n[i]*amp;tot+=amp;amp*=0.5;freq*=0.48;}
+  for(let i=0;i<w*h;i++)out[i]/=tot;}
+function argVal(a){ // resolve an operand to a number
+  return a[0]===K_PARAM ? VM.params[a[1]].val : a[1];
+}
+function runOp(op){
+  const w=VM.cw,h=VM.ch,cells=w*h,G=VM.grids;
+  switch(op[0]){
+    case OP.FBM:{const d=G[op[1][1]],oct=argVal(op[2]);fbm(d,w,h,oct,4+Math.random()*10);break;}
+    case OP.CONTRAST:{const d=G[op[1][1]],c=0.5+argVal(op[2])*0.05;
+      for(let i=0;i<cells;i++){let v=(d[i]-0.5)*c+0.5;d[i]=v<0?0:v>1?1:v;}break;}
+    case OP.DITHER:{const d=G[op[1][1]],err=new Float32Array(cells);
+      for(let y=0;y<h;y++)for(let x=0;x<w;x++){const i=y*w+x;let old=d[i]+err[i];old=old<0?0:old>1?1:old;
+        const nw=old>=0.5?1:0;d[i]=nw;const e=old-nw;
+        if(x+1<w)err[i+1]+=e*7/16;
+        if(y+1<h){if(x>0)err[i+w-1]+=e*3/16;err[i+w]+=e*5/16;if(x+1<w)err[i+w+1]+=e*1/16;}}break;}
+    case OP.SEED:{const d=G[op[1][1]],dens=0.38+Math.random()*0.24;
+      for(let i=0;i<cells;i++)d[i]=Math.random()<dens?1:0;break;}
+    case OP.CA:{const d=G[op[1][1]],steps=argVal(op[2]),tmp=new Float32Array(cells);
+      for(let s=0;s<steps;s++){for(let y=0;y<h;y++)for(let x=0;x<w;x++){let n=0;
+        for(let dy=-1;dy<=1;dy++)for(let dx=-1;dx<=1;dx++){if(!dx&&!dy)continue;n+=d[((y+dy+h)%h)*w+(x+dx+w)%w];}
+        const a=d[y*w+x];tmp[y*w+x]=((a&&(n==2||n==3))||(!a&&n==3))?1:0;}d.set(tmp);}break;}
+    case OP.CAMO:{const d=G[op[1][1]];d.fill(0);const n=new Float32Array(cells);let tot=0;
+      for(const[fr,am]of[[w*0.18,1],[w*0.09,0.5],[w*0.04,0.25]]){valueNoise(n,w,h,fr);for(let i=0;i<cells;i++)d[i]+=n[i]*am;tot+=am;}
+      for(let i=0;i<cells;i++)d[i]/=tot;break;}
+    case OP.NOISE:{const d=G[op[1][1]];valueNoise(d,w,h,w*(argVal(op[2])/100));break;}
+    case OP.THRESHOLD:{const d=G[op[1][1]],raw=G[op[2][1]],tn=G[op[3][1]],th=1-argVal(op[4])/100;
+      VM.thresh=th;for(let i=0;i<cells;i++)d[i]=(raw[i]+tn[i]*0.18)>th?1:0;break;}
+    case OP.SORTINIT:{VM.sortCol=new Uint8Array(w);VM.sortOff=new Float32Array(w);VM.sortSpd=new Float32Array(w);
+      for(let x=0;x<w;x++){VM.sortCol[x]=Math.random()<0.5?1:0;VM.sortSpd[x]=0.3+Math.random()*2.2;}
+      VM.camoX=VM.camoY=0;break;}
+    case OP.DRIFT:{const d=G[op[1][1]],raw=G[op[2][1]],tn=G[op[3][1]],th=1-argVal(op[4])/100;
+      VM.camoX+=0.0030;VM.camoY+=0.0016;const ox=VM.camoX*w*0.04,oy=VM.camoY*h*0.04;
+      for(let cy=0;cy<h;cy++){let sy=((cy+oy)%h+h)%h;const iy=sy|0,ty=sy-iy,iy1=(iy+1)%h,sty=smooth(ty);
+        for(let cx=0;cx<w;cx++){let sx=((cx+ox)%w+w)%w;const ix=sx|0,tx=sx-ix,ix1=(ix+1)%w,stx=smooth(tx);
+          const a=raw[iy*w+ix],b=raw[iy*w+ix1],c=raw[iy1*w+ix],dd=raw[iy1*w+ix1];
+          const rv=a+(b-a)*stx+(c-a)*sty+(a-b-c+dd)*stx*sty;
+          const ta=tn[iy*w+ix],tb=tn[iy*w+ix1],tc=tn[iy1*w+ix],td=tn[iy1*w+ix1];
+          const tv=ta+(tb-ta)*stx+(tc-ta)*sty+(ta-tb-tc+td)*stx*sty;
+          d[cy*w+cx]=(rv+tv*0.18)>th?1:0;}}break;}
+    case OP.COMPOSE_SORT:{const fs=G[op[1][1]],ca=G[op[2][1]],mask=G[op[3][1]];
+      for(let x=0;x<w;x++)if(VM.sortCol[x])VM.sortOff[x]=(VM.sortOff[x]+VM.sortSpd[x]*0.22+h*4)%(h*4);
+      const img=VM.img.data;
+      for(let cy=0;cy<h;cy++)for(let cx=0;cx<w;cx++){let pix;
+        if(mask[cy*w+cx]&&VM.sortCol[cx]){const srcY=((cy-Math.round(VM.sortOff[cx]))%h+h)%h;pix=ca[srcY*w+cx];}
+        else pix=mask[cy*w+cx]?ca[cy*w+cx]:fs[cy*w+cx];
+        const v=pix?255:0,px0=cx*VM.cell,py0=cy*VM.cell;
+        for(let dy=0;dy<VM.cell&&py0+dy<VM.H;dy++)for(let dx=0;dx<VM.cell&&px0+dx<VM.W;dx++){
+          const o=((py0+dy)*VM.W+(px0+dx))*4;img[o]=img[o+1]=img[o+2]=v;img[o+3]=255;}}
+      break;}
+  }
+}
+function vmInit(prog,W,H,ctx){
+  VM={...prog,W,H,cell:prog.cell,cw:Math.ceil(W/prog.cell),ch:Math.ceil(H/prog.cell),
+      grids:[],img:ctx.createImageData(W,H)};
+  for(let i=0;i<prog.nGrids;i++)VM.grids.push(new Float32Array(VM.cw*VM.ch));
+  for(const op of prog.init)runOp(op);
+}
+function vmFrame(ctx){ for(const op of VM.frame)runOp(op); ctx.putImageData(VM.img,0,0); }
+
+// ======================================================================
+// Page: compile, preview loop, sliders, export.
+// ======================================================================
+const W=170,H=320, cv=document.getElementById('stage'), ctx=cv.getContext('2d');
+let prog=null, bc=null;
+function build(){
+  bc=compile(PIPELINE); prog=parse(bc);
+  document.getElementById('pname').textContent=PIPELINE.name;
+  document.getElementById('bsize').textContent=bc.length+' bytes';
+  document.getElementById('gdims').textContent=Math.ceil(W/PIPELINE.cell)+'×'+Math.ceil(H/PIPELINE.cell)+' cells';
+  document.getElementById('ops').textContent=
+    'init:  '+PIPELINE.init.map(o=>OPNAME[o[0]]).join(' → ')+'\n'+
+    'frame: '+PIPELINE.frame.map(o=>OPNAME[o[0]]).join(' → ');
+  vmInit(prog,W,H,ctx);
+}
+function sliders(){
+  document.getElementById('params').innerHTML=prog.params.map((p,i)=>
+    '<div class=slider><label>'+p.label+' <b id=v'+i+'>'+p.val+'</b></label>'+
+    '<input type=range min='+p.min+' max='+p.max+' value='+p.val+' data-i='+i+'></div>').join('');
+  document.querySelectorAll('#params input').forEach(inp=>{
+    inp.addEventListener('input',e=>{const i=+e.target.dataset.i;prog.params[i].val=+e.target.value;
+      document.getElementById('v'+i).textContent=e.target.value;
+      if(prog.params[i].reinit)vmInit(prog,W,H,ctx);});
+  });
+}
+document.getElementById('regen').onclick=()=>vmInit(prog,W,H,ctx);
+document.getElementById('dl').onclick=()=>{const b=new Blob([bc],{type:'application/octet-stream'});
+  const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download=PIPELINE.name.replace(/\W+/g,'_')+'.tdpg';a.click();};
+build(); sliders();
+(function loop(){ vmFrame(ctx); requestAnimationFrame(loop); })();
+</script>
